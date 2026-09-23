@@ -101,6 +101,14 @@ public sealed class AdminApi
 
     public Task<JsonElement> GetStatusAsync(int lines, CancellationToken ct = default) => Get<JsonElement>($"/api/admin/status?lines={lines}", ct);
 
+    /// <summary>true = the stored key opens the admin API (or the server is unreachable, which isn't the key's fault).</summary>
+    public async Task<bool> KeyWorksAsync()
+    {
+        try { await GetConfigAsync(); return true; }
+        catch (AdminException ex) when (ex.Message.StartsWith("401")) { return false; }
+        catch { return true; }
+    }
+
     public async Task RestartAsync()
     {
         using var resp = await Send(Req(HttpMethod.Post, "/api/admin/restart"));
@@ -116,7 +124,8 @@ public sealed class AdminApi
         {
             using var resp = await Send(Req(HttpMethod.Get, "/docs/desktop-client-spec.md"));
             var md = await resp.Content.ReadAsStringAsync();
-            var m = Regex.Match(md, @"\*\*Access key\*\*[^`\r\n]*`([^`\s]+)`");
+            // The line reads: **Access key** (`x-tars-key` header): `KEY`. Take the last code span, not the header name.
+            var m = Regex.Match(md, @"\*\*Access key\*\*[^\r\n]*`([^`\s]+)`[^`\r\n]*$", RegexOptions.Multiline);
             return m.Success ? m.Groups[1].Value : null;
         }
         catch (AdminException ex)

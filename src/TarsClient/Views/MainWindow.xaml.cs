@@ -209,7 +209,11 @@ public partial class MainWindow : Window
                 KeepReplyAtEnd();
                 break;
             case nameof(MainViewModel.SettingsOpen):
-                if (_vm.SettingsOpen) FocusFirstInTab();
+                if (_vm.SettingsOpen)
+                {
+                    if (KeyBox.Password != _vm.Settings.AccessKey) KeyBox.Password = _vm.Settings.AccessKey;
+                    FocusFirstInTab();
+                }
                 else Dispatcher.BeginInvoke(() => { Scrollback.ScrollToEnd(); ExpandedPrompt.Focus(); });
                 break;
             case nameof(MainViewModel.Topmost):

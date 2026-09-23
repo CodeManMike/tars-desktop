@@ -192,15 +192,17 @@ public sealed partial class MainViewModel : ObservableObject
         Game.Start();
         Voice.Start();
 
-        if (string.IsNullOrWhiteSpace(S.AccessKey))
+        // Provision the access key from the server's spec (allowlisted PCs only), and heal it after a rotation.
+        if (string.IsNullOrWhiteSpace(S.AccessKey) || !await Admin.KeyWorksAsync())
         {
             var key = await Admin.FetchKeyFromSpecAsync();
-            if (key != null)
+            if (key != null && key != S.AccessKey)
             {
                 S.AccessKey = key;
                 Store.Save();
                 Boot("ACCESS KEY PROVISIONED FROM SERVER · DPAPI SEALED");
             }
+            else if (key == null) Add(LineKind.Error, "NO ACCESS KEY: set it under SET → SYSTEM");
         }
         Server.Start();
     }
