@@ -241,7 +241,8 @@ The server certificate is issued by **"TARS Home CA (cmm-media only)"** (name-co
 | `{"type":"test_voice"}` | TARS says a short test line |
 | `{"type":"cancel_timer","id":"a1b2c3d4"}` | cancel one timer or reminder |
 | `{"type":"dismiss"}` | stop a ringing alarm everywhere |
-| `{"type":"client","name":"tars-desktop","tts":"local"\|"server"}` | send right after connect (and whenever the voice engine changes). `local` = send me `say` text, I voice it; `server` = send WAV |
+| `{"type":"client","name":"tars-desktop","tts":"local"\|"server","stt":"local"\|"server"}` | send right after connect (and whenever the voice or STT engine changes). `tts:"local"` = send me `say` text, I voice it; `server` = send WAV. `stt:"local"` = I transcribe myself and send `utterance` (PCM frames and `ptt` are still accepted as a fallback) |
+| `{"type":"utterance","text":"...","source":"ptt"\|"wake"\|"open","speech_ms":1200,"stt_ms":180,"logprob":-0.21,"no_speech_prob":0.02,"model":"large-v3-turbo"}` | text from client-side STT (see Client-side STT). Only `text` is required, but send the stats: they feed the noise and hallucination guard |
 
 ### Client → server (binary frames)
 16 kHz mono Int16 LE PCM (see Sending rules).
@@ -253,7 +254,7 @@ The server certificate is issued by **"TARS Home CA (cmm-media only)"** (name-co
 | `settings {settings:{voice,speed,pitch,chord,humor,honesty,brevity}, voices:[...]}` | fill the Settings screen. Sent on connect and after any change |
 | `timers {timers:[{id,kind:"timer"\|"reminder",label,due,text}], now}` | replace the list (see Timers) |
 | `status {state:"idle"\|"hearing"\|"transcribing"\|"thinking"}` | title-bar tag |
-| `heard {accepted, text, reason, stt_ms, speech_ms, logprob, stt}` | an utterance was transcribed. If `accepted:false` it was ignored (noise, no wake name, busy); show it only in "details" mode |
+| `heard {accepted, text, reason, stt_ms, speech_ms, logprob, stt}` | an utterance was transcribed (`stt`: `cloud`, `local` or `client`). If `accepted:false` it was ignored (noise, no wake name, busy); show it only in "details" mode |
 | `user {text}` | what TARS is answering: show as `> text` |
 | `reply {text}` | a sentence of TARS's reply. **Append** to the current reply with a space; a turn can have several |
 | `tool {name, args}` | TARS used a tool (`web_search`, `home`, `home_state`, `remember`). Details mode only, e.g. `  · web_search: rugby world cup` |
@@ -261,11 +262,27 @@ The server certificate is issued by **"TARS Home CA (cmm-media only)"** (name-co
 | `alarm {id, kind, text}` | ring (see Alarms). The spoken WAV follows as a binary frame |
 | `stop {}` | stop playback and alarm now |
 | `error {text}` | show as an error line |
-| `client_ok {tts}` | acknowledges `client`; `tts` is `local` or `server` |
+| `client_ok {tts, stt}` | acknowledges `client`; each is `local` or `server` |
 | `say {text, speak, seq, kind}` | **local voice only.** Voice `speak` (normalised for speech: name as "Tars", units, powers); display uses `reply`. `seq` orders chunks within a turn. `kind`: `reply`, `filler` (quick "Checking."/"One moment." before a search: speak it quickly and lightly), `alarm` (after the chime) |
 
 ### Server → client (binary frames)
 Server voice only: one WAV per sentence (PCM16, mono, 24 kHz). Play in order. Not sent to a client that declared `tts:"local"`.
+
+### Client-side STT (`utterance`)
+MIKES-PC transcribes with faster-whisper on the GPU and sends text instead of PCM. The server runs the same gate as for its own STT, so noise can't reach TARS whichever side transcribes.
+
+**Server gate, in order** (`app/stt.py` `judge_client`/`judge`, `app/main.py` `gate`):
+1. A turn is already running → `heard accepted:false reason:"busy, still answering"`.
+2. `speech_ms` < 250 → "no speech".
+3. `logprob` < −1.0, or `no_speech_prob` > 0.6 with `logprob` < −0.5 → "low confidence".
+4. Non-speech tags stripped (`[..]`, `(..)`, `♪♫*~`); nothing left → "no words".
+5. Hallucination guard: "thank you", "thanks for watching", "subscribe", "bye", "you", "so", "…subtitles by…" and similar are accepted only with `speech_ms` ≥ 450, `logprob` > −0.45 and `no_speech_prob` < 0.25.
+6. Wake name: needed only when `source` is `wake` **and** more than 8 s have passed since the last `playback end`. Pattern: `\b(hey |ok |okay |yo )?(tars|tarz|tarss)\b` (from `WAKE_WORDS`). `ptt` and `open` never need it.
+7. Name only ("TARS.") → TARS says "Yes?" and the 8-second follow-up window opens after playback.
+
+Missing stats skip their checks (and count as strong evidence for rule 5), so always send them. `logprob` = mean `avg_logprob` of the kept segments, `no_speech_prob` = max over them, `speech_ms` = Silero-voiced milliseconds, `stt_ms` = transcription time. `source` defaults to the session's mode if missing.
+
+**Mirror on the client** (saves a round trip, the server re-checks anyway): clip ≥ 300 ms; Silero voiced ≥ 250 ms; drop segments with (nsp > 0.6 and lp < −0.5), lp < −1.0 or compression ratio > 2.4; give Whisper the name via `initial_prompt: "Hey TARS."` or `hotwords: "TARS"`.
 
 ### HTTP (optional helpers)
 - `GET /api/health` → `{"ok":true,"name":"TARS","llm_ready":true,"cloud":"openai/gpt-oss-120b","cloud_stt":true,"ha":true,...}`. Use it as a connection test in Settings.
