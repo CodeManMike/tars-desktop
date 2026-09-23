@@ -378,7 +378,7 @@
                                              ToolTip="large-v3-turbo: best accuracy, ~1.6 GB VRAM, ~0.2-0.4 s. small.en: CPU, used automatically in game mode" />
                                 <TextBlock Style="{StaticResource Head}" Text="VOICE LOCK · only you can wake TARS" />
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
-                                           Text="With YouTube or a TV on, TARS only reacts to your voice. It learns you from one 20 s reading; anything else is dropped before speech recognition runs. Push-to-talk always works." />
+                                           Text="With YouTube or a TV on, TARS only reacts to your voice. It learns you from one 20 s reading; longer speech from anyone else is dropped before speech recognition runs (short phrases like a lone &quot;TARS&quot; are too short to judge, so the wake-name check handles those). Push-to-talk always works." />
                                 <Border BorderBrush="{StaticResource FgDim}" BorderThickness="1" Padding="6,4" Margin="0,4,0,2">
                                     <StackPanel>
                                         <TextBlock Text="READ THIS in your normal voice, the way you talk to TARS:" Foreground="{StaticResource FgBright}" />

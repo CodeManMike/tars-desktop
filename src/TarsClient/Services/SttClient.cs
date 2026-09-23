@@ -56,8 +56,8 @@ public sealed class SttClient : IDisposable
         var c = _modelChoice();
         if (c == _sentConfig) return;
         _sentConfig = c;
-        // No "TARS" hotword: it made Whisper hear the name in coughs and throat-clearing.
-        Control(new { type = "config", model = c.model, device = c.device, hotwords = "", speaker = c.speaker, speaker_threshold = c.threshold });
+        // "TARS" hotword: a short "TARS" is misheard ("Charles") without it; unclear name-only clips are rejected downstream.
+        Control(new { type = "config", model = c.model, device = c.device, hotwords = "TARS", speaker = c.speaker, speaker_threshold = c.threshold });
     }
 
     void Control(object o) { if (IsReady) _out.Writer.TryWrite((false, JsonSerializer.SerializeToUtf8Bytes(o))); }

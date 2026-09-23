@@ -40,6 +40,8 @@ MIN_SPEECH_MS = 250             # Silero-voiced time
 MIN_CLIP_MS = 300               # whole clip
 HANGOVER_MS = 900               # silence that ends an utterance (natural mid-sentence pauses survive)
 MAX_UTTERANCE_S = 25
+LOCK_MIN_MS = 1500              # voiceprints are unreliable on shorter clips (a lone "TARS" scores like a stranger)
+NAME_ONLY = re.compile(r"^\W*(hey |ok |okay |yo )?(tars|tarz|tarss)\W*$", re.I)
 GATE_FLOOR_MIN = 10 ** (-62 / 20)   # adaptive gate: skip Silero while the level is within ~6 dB of the noise floor
 GATE_OVER_FLOOR = 2.0                # +6 dB
 
@@ -130,8 +132,9 @@ class Transcriber:
         self.lock = threading.Lock()
         self.model_name = "large-v3-turbo"
         self.device = "cuda"
-        # No "TARS" hint: biasing Whisper towards the name makes it hallucinate the name on coughs and noise.
-        self.hotwords = ""
+        # "TARS" hint: without it a short "TARS" comes out as "Charles". The cost is the name hallucinated on
+        # coughs, so a name-only transcript must be clear speech (mirrors the server's name-only guard).
+        self.hotwords = "TARS"
 
     def configure(self, model: str | None, device: str | None, hotwords: str | None):
         if model:
@@ -305,7 +308,7 @@ class Session:
             await self.send({"type": "rejected", "reason": f"no speech ({voiced_ms} ms voiced)", "text": ""})
             return
         sim = None
-        if source == "vad" and self.speaker:
+        if source == "vad" and self.speaker and voiced_ms >= LOCK_MIN_MS:
             try:
                 sim = await asyncio.get_running_loop().run_in_executor(None, SPEAKERS.similarity, self.speaker, audio)
             except Exception as e:
@@ -322,6 +325,10 @@ class Session:
             await self.send({"type": "rejected", "reason": f"stt error: {e}", "text": ""})
             return
         text = r["text"]
+        if NAME_ONLY.match(text) and (voiced_ms < 300 or r["logprob"] <= -0.6 or r["no_speech_prob"] >= 0.4):
+            log.info("stt: rejected unclear name-only %r (%d ms, lp %.2f)", text, voiced_ms, r["logprob"])
+            await self.send({"type": "rejected", "reason": "name only, too unclear", "text": text, **r})
+            return
         if not text or HALLUCINATIONS.match(text.strip()):
             log.info("stt: rejected as noise: %r", text)
             await self.send({"type": "rejected", "reason": "noise", "text": text, **r})
