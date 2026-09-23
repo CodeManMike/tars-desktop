@@ -531,7 +531,18 @@ public sealed partial class SettingsViewModel : ObservableObject
     // ================================================================== SYSTEM
 
     public string ServerUrl { get => S.ServerUrl; set { S.ServerUrl = value.Trim(); _main.Store.Save(); OnPropertyChanged(); } }
-    public string AccessKey { get => S.AccessKey; set { S.AccessKey = value.Trim(); _main.Store.Save(); OnPropertyChanged(); } }
+    public string AccessKey
+    {
+        get => S.AccessKey;
+        set
+        {
+            if (S.AccessKey == value.Trim()) return;
+            S.AccessKey = value.Trim();
+            _main.Store.Save();
+            OnPropertyChanged();
+            if (_main.Server.IsDenied || !_main.IsConnected) _main.Server.Restart();   // a new key: try it now
+        }
+    }
 
     public bool StartWithWindows
     {

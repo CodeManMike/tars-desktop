@@ -557,7 +557,8 @@ public sealed partial class MainViewModel : ObservableObject
         StopSpeech();
         if (AlarmActive) StopAlarm(true);
         if (_sttLocal) Stt.PttStart();
-        if (!_sttLocal || _serverStt) Server.SendJson(new { type = "ptt", state = "start" });
+        // With local STT the bracket lives in the sidecar; the server gets the finished `utterance` (source "ptt").
+        if (!_sttLocal) Server.SendJson(new { type = "ptt", state = "start" });
         _pttSending = true;
         RecomputeStatus();
     }
@@ -574,7 +575,7 @@ public sealed partial class MainViewModel : ObservableObject
         if (gen != _pttGeneration) return;
         _pttSending = false;
         if (_sttLocal) Stt.PttEnd();
-        if (!_sttLocal || _serverStt) Server.SendJson(new { type = "ptt", state = "end" });
+        if (!_sttLocal) Server.SendJson(new { type = "ptt", state = "end" });
         RecomputeStatus();
     }
 
