@@ -32,7 +32,8 @@ RATE = 16000
 CHUNK = 512                     # Silero's native window at 16 kHz (32 ms)
 PREROLL_CHUNKS = 10             # ~320 ms kept before speech onset
 START_PROB, END_PROB = 0.5, 0.35
-MIN_SPEECH_MS = 250
+MIN_SPEECH_MS = 250             # Silero-voiced time
+MIN_CLIP_MS = 300               # whole clip
 HANGOVER_MS = 700               # silence that ends an utterance
 MAX_UTTERANCE_S = 25
 
@@ -110,7 +111,10 @@ class Transcriber:
             segs, info = self.model.transcribe(
                 audio, language="en", beam_size=5, vad_filter=False, condition_on_previous_text=False,
                 without_timestamps=True, hotwords=self.hotwords or None)
-            segs = list(segs)
+            # Per-segment filter, mirroring the server's gate: drop low-confidence / repetitive segments.
+            segs = [s for s in segs
+                    if not ((s.no_speech_prob > 0.6 and s.avg_logprob < -0.5) or s.avg_logprob < -1.0
+                            or s.compression_ratio > 2.4)]
             text = " ".join(s.text.strip() for s in segs).strip()
             logprob = float(np.mean([s.avg_logprob for s in segs])) if segs else -10.0
             no_speech = float(max((s.no_speech_prob for s in segs), default=1.0))
@@ -213,7 +217,7 @@ class Session:
         self.in_speech = False
         self.voiced_chunks = self.silence_chunks = 0
         self.vad.reset()
-        if voiced_ms < MIN_SPEECH_MS:
+        if voiced_ms < MIN_SPEECH_MS or len(audio) * 1000 / RATE < MIN_CLIP_MS:
             await self.send({"type": "rejected", "reason": f"no speech ({voiced_ms} ms voiced)", "text": ""})
             return
         await self.send({"type": "transcribing"})
@@ -224,7 +228,7 @@ class Session:
             await self.send({"type": "rejected", "reason": f"stt error: {e}", "text": ""})
             return
         text = r["text"]
-        if not text or HALLUCINATIONS.match(text.strip()) or (r["no_speech_prob"] > 0.6 and r["logprob"] < -1.0):
+        if not text or HALLUCINATIONS.match(text.strip()):
             await self.send({"type": "rejected", "reason": "noise", "text": text, **r})
             return
         await self.send({"type": "utterance", "text": text, "source": source, "speech_ms": voiced_ms, **r})
