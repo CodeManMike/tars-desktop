@@ -36,6 +36,7 @@ MIN_SPEECH_MS = 250             # Silero-voiced time
 MIN_CLIP_MS = 300               # whole clip
 HANGOVER_MS = 700               # silence that ends an utterance
 MAX_UTTERANCE_S = 25
+QUIET_RMS = 10 ** (-50 / 20)    # below this a chunk can't be speech: skip the VAD model (idle CPU)
 
 # Whisper's favourite things to say to silence and noise.
 HALLUCINATIONS = re.compile(
@@ -181,6 +182,13 @@ class Session:
         self.pending = np.concatenate([self.pending, samples])
         while len(self.pending) >= CHUNK:
             chunk, self.pending = self.pending[:CHUNK], self.pending[CHUNK:]
+            # A quiet room is most of the day: don't run Silero on silence (unless mid-utterance, where
+            # the model's state matters for the end-of-speech decision).
+            if not self.ptt and not self.in_speech and float(np.sqrt(np.mean(chunk * chunk))) < QUIET_RMS:
+                self.preroll.append(chunk)
+                if len(self.preroll) > PREROLL_CHUNKS:
+                    self.preroll.pop(0)
+                continue
             p = self.vad.prob(chunk)
             if self.ptt:
                 self.speech.append(chunk)
