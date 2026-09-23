@@ -38,6 +38,7 @@ public sealed class SettingsStore
             Current = new();
         }
         Current.AccessKey = Unprotect(Current.AccessKeyProtected);
+        if (Current.PttKey.StartsWith("Mouse", StringComparison.OrdinalIgnoreCase)) Current.PttKey = "RightCtrl";
     }
 
     /// <summary>Saves shortly after the last change (slider drags don't hammer the disk).</summary>

@@ -361,7 +361,7 @@
                                                ToolTip="How long the mic stays deaf after TARS stops talking, so it never hears itself" />
                                 <DockPanel Margin="0,6,0,0">
                                     <TextBlock Text="PTT KEY       " />
-                                    <Button DockPanel.Dock="Right" Content="CAPTURE" Command="{Binding CapturePttCommand}" ToolTip="Press the key or mouse side button to use for push-to-talk" />
+                                    <Button DockPanel.Dock="Right" Content="CAPTURE" Command="{Binding CapturePttCommand}" ToolTip="Press the key to use for push-to-talk (default: Right Ctrl)" />
                                     <TextBlock Text="{Binding PttKey}" Foreground="{StaticResource FgBright}" />
                                 </DockPanel>
                                 <CheckBox Content="SWALLOW THE PTT KEY (other apps won't see it)" IsChecked="{Binding PttSwallow}" />
@@ -398,7 +398,7 @@
                                                ToolTip="How close a voice must be to yours. Tested: you ~90, other voices ~60. Lower if it ignores you, raise if others get through" />
                                 <CheckBox Content="MUTE MIC" IsChecked="{Binding DataContext.MicMuted, RelativeSource={RelativeSource AncestorType=Window}}" />
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap" Margin="0,8,0,0"
-                                           Text="Hold the PTT key anywhere, even in a game. In the window, holding SPACE also talks. Mouse 4/5 work too." />
+                                           Text="Hold the PTT key (Right Ctrl by default) anywhere, even in a game. In the window, holding SPACE also talks." />
                             </StackPanel>
                         </ScrollViewer>
 

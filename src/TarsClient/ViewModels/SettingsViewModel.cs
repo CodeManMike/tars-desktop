@@ -586,7 +586,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     void CapturePtt()
     {
-        PttKey = "press a key or mouse button…";
+        PttKey = "press a key…";
         Capturing = true;
         _main.Hotkeys.CaptureNext(name =>
         {

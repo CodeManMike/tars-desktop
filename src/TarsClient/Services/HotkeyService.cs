@@ -5,7 +5,8 @@ using TarsClient.Native;
 namespace TarsClient.Services;
 
 /// <summary>
-/// Global hold-to-talk and stop hotkey via WH_KEYBOARD_LL / WH_MOUSE_LL, so they work while a game has focus.
+/// Global hold-to-talk and stop hotkey via WH_KEYBOARD_LL, so they work while a game has focus.
+/// Keyboard only: mouse buttons are never hooked (Michael's side buttons are used elsewhere).
 /// The hooks live on a dedicated thread with its own message loop: a busy UI thread can't get them dropped.
 /// Events are raised on the UI thread. Keys are passed on unless <see cref="Swallow"/> is set.
 /// </summary>
@@ -17,10 +18,10 @@ public sealed class HotkeyService : IDisposable
     readonly System.Windows.Threading.Dispatcher _ui;
     Thread? _thread;
     uint _threadId;
-    IntPtr _kbHook, _mouseHook;
-    Win32.HookProc? _kbProc, _mouseProc;   // keep delegates alive
+    IntPtr _kbHook;
+    Win32.HookProc? _kbProc;   // keep the delegate alive
 
-    volatile int _pttVk;            // virtual key, or -4 / -5 for mouse X buttons
+    volatile int _pttVk;            // virtual key
     volatile int _stopVk;
     volatile int _stopMods;         // 1 ctrl, 2 alt, 4 shift, 8 win
     volatile bool _pttDown;
@@ -44,15 +45,12 @@ public sealed class HotkeyService : IDisposable
         {
             _threadId = Win32.GetCurrentThreadId();
             _kbProc = KeyboardProc;
-            _mouseProc = MouseProc;
             var mod = Win32.GetModuleHandle(null);
             _kbHook = Win32.SetWindowsHookEx(Win32.WH_KEYBOARD_LL, _kbProc, mod, 0);
-            _mouseHook = Win32.SetWindowsHookEx(Win32.WH_MOUSE_LL, _mouseProc, mod, 0);
             if (_kbHook == IntPtr.Zero) Log.Write($"hotkeys: keyboard hook failed ({Marshal.GetLastWin32Error()})");
             ready.Set();
             while (Win32.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0) { }
             Win32.UnhookWindowsHookEx(_kbHook);
-            Win32.UnhookWindowsHookEx(_mouseHook);
         }) { IsBackground = true, Name = "TARS hotkeys", Priority = ThreadPriority.AboveNormal };
         _thread.Start();
         ready.Wait(2000);
@@ -66,15 +64,13 @@ public sealed class HotkeyService : IDisposable
         _stopMods = mods;
     }
 
-    /// <summary>The next key or mouse side button pressed anywhere is reported (and swallowed) instead of acted on.</summary>
+    /// <summary>The next key pressed anywhere is reported (and swallowed) instead of acted on.</summary>
     public void CaptureNext(Action<string> onKey) => _capture = onKey;
     public void CancelCapture() => _capture = null;
 
-    // "RightCtrl", "F13", "Mouse4", "Mouse5"
+    // "RightCtrl", "F13", … (anything unknown, including old "Mouse4"/"Mouse5" settings, falls back to Right Ctrl)
     public static int ParseKey(string name)
     {
-        if (name.Equals("Mouse4", StringComparison.OrdinalIgnoreCase)) return -4;
-        if (name.Equals("Mouse5", StringComparison.OrdinalIgnoreCase)) return -5;
         return Enum.TryParse<Key>(name, true, out var k) ? KeyInterop.VirtualKeyFromKey(k) : VK_RCONTROL;
     }
 
@@ -156,27 +152,6 @@ public sealed class HotkeyService : IDisposable
             swallow = true;
         }
         return swallow ? 1 : Win32.CallNextHookEx(_kbHook, nCode, wParam, lParam);
-    }
-
-    IntPtr MouseProc(int nCode, IntPtr wParam, IntPtr lParam)
-    {
-        int msg = (int)wParam;
-        if (nCode < 0 || msg is not (Win32.WM_XBUTTONDOWN or Win32.WM_XBUTTONUP))
-            return Win32.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-        var m = Marshal.PtrToStructure<Win32.MSLLHOOKSTRUCT>(lParam);
-        int button = (int)(m.mouseData >> 16) == 1 ? -4 : -5;
-        bool down = msg == Win32.WM_XBUTTONDOWN;
-
-        if (_capture is { } cap && down)
-        {
-            _capture = null;
-            _ui.BeginInvoke(() => cap(button == -4 ? "Mouse4" : "Mouse5"));
-            return 1;
-        }
-        if (!Enabled || button != _pttVk) return Win32.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
-        if (down && !_pttDown) { _pttDown = true; _ui.BeginInvoke(() => PttDown?.Invoke()); }
-        else if (!down && _pttDown) { _pttDown = false; _ui.BeginInvoke(() => PttUp?.Invoke()); }
-        return Swallow ? 1 : Win32.CallNextHookEx(_mouseHook, nCode, wParam, lParam);
     }
 
     public void Dispose()

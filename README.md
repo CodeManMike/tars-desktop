@@ -59,7 +59,7 @@ The GPU model unloads after 10 idle minutes (configurable) and reloads on the ne
 
 | | |
 |---|---|
-| Right Ctrl (global, configurable, Mouse 4/5 too) | hold to talk |
+| Right Ctrl (global, configurable; keyboard keys only) | hold to talk |
 | Space (in the window) | hold to talk |
 | Ctrl+Alt+S (global) | stop speech / dismiss alarm |
 | F2 or `[SET]` | settings (Ctrl+←/→ switch tabs) |
