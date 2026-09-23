@@ -99,10 +99,16 @@ class SpeakerLock:
         if a.ndim > 1:
             a = a.mean(axis=1)
         a = librosa.resample(a, orig_sr=sr, target_sr=RATE)
-        e = self.embed(a)
+        # Only real speech makes a voiceprint: silence or TV in the room would produce one that rejects the owner.
+        vad = StreamVad()
+        voiced = [a[i:i + CHUNK] for i in range(0, len(a) - CHUNK + 1, CHUNK) if vad.prob(a[i:i + CHUNK]) >= START_PROB]
+        voiced_s = len(voiced) * CHUNK / RATE
+        if voiced_s < 8:
+            raise ValueError(f"only {voiced_s:.1f} s of speech heard (need 8+): speak for the whole 20 s, closer to the mic")
+        e = self.embed(np.concatenate(voiced))
         np.save(out_path, e)
         self.profiles.pop(out_path, None)
-        return {"ok": True, "seconds": round(len(a) / RATE, 1), "out": out_path}
+        return {"ok": True, "seconds": round(len(a) / RATE, 1), "speech_s": round(voiced_s, 1), "out": out_path}
 
     def similarity(self, profile_path: str, audio16k: np.ndarray) -> float:
         prof = self.profiles.get(profile_path)
@@ -350,7 +356,11 @@ def mount(app, transcriber: Transcriber):
     @app.post("/stt/enroll")
     async def stt_enroll(body: dict):
         """Build a voiceprint from a recording: {"wav": path, "out": path.npy}."""
-        return await asyncio.to_thread(SPEAKERS.enroll, body["wav"], body["out"])
+        from fastapi.responses import JSONResponse
+        try:
+            return await asyncio.to_thread(SPEAKERS.enroll, body["wav"], body["out"])
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
     @app.post("/stt/unload")
     async def stt_unload():

@@ -353,7 +353,15 @@ public sealed partial class SettingsViewModel : ObservableObject
             using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(60) };
             var resp = await http.PostAsync(S.Tts.SidecarUrl.TrimEnd('/') + "/stt/enroll",
                 System.Net.Http.Json.JsonContent.Create(new { wav, @out = npy }));
-            resp.EnsureSuccessStatusCode();
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = await resp.Content.ReadAsStringAsync();
+                try { err = System.Text.Json.JsonDocument.Parse(err).RootElement.GetProperty("error").GetString() ?? err; } catch { }
+                EnrollStatus = "NOT SAVED: " + err + " · voice lock unchanged";
+                try { File.Delete(wav); } catch { }
+                return;
+            }
+            try { File.Delete(wav); } catch { }      // the voiceprint is all we keep
             S.Stt.Voiceprint = npy;
             S.Stt.VoiceLock = true;
             _main.Store.Save();
