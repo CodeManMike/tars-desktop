@@ -270,7 +270,9 @@
                                            Text="15–20 s WAV of calm, dry, deadpan reading: your voice or a consenting friend's. Empty = an original deep voice rendered locally. Don't use film clips of real actors." />
                                 <Border BorderBrush="{StaticResource FgDim}" BorderThickness="1" Padding="6,4" Margin="0,6,0,2">
                                     <StackPanel>
-                                        <TextBlock Text="RECORD YOUR OWN · read this, flat and unhurried, like reading a status report:" Foreground="{StaticResource FgBright}" />
+                                        <TextBlock Text="RECORD A NEW TARS VOICE · TARS will sound like whoever reads this" Foreground="{StaticResource FgBright}" />
+                                        <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
+                                                   Text="Use someone else's voice (a consenting friend with a deep, calm voice). To teach TARS to recognise YOUR voice, use AUDIO → TRAIN ON MY VOICE instead. Read flat and unhurried, like a status report:" />
                                         <TextBlock Text="{x:Static vm:SettingsViewModel.ReferenceScript}" TextWrapping="Wrap" Margin="0,4,0,6" />
                                         <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
                                                    Text="Quiet room · mouth about a hand-width from the mic · low, calm voice · no smile · same pace throughout · pause briefly before the jokes." />
@@ -377,6 +379,14 @@
                                 <TextBlock Style="{StaticResource Head}" Text="VOICE LOCK · only you can wake TARS" />
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
                                            Text="With YouTube or a TV on, TARS only reacts to your voice. It learns you from one 20 s reading; anything else is dropped before speech recognition runs. Push-to-talk always works." />
+                                <Border BorderBrush="{StaticResource FgDim}" BorderThickness="1" Padding="6,4" Margin="0,4,0,2">
+                                    <StackPanel>
+                                        <TextBlock Text="READ THIS in your normal voice, the way you talk to TARS:" Foreground="{StaticResource FgBright}" />
+                                        <TextBlock Text="{x:Static vm:SettingsViewModel.ReferenceScript}" TextWrapping="Wrap" Margin="0,4,0,0" />
+                                        <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap" Margin="0,4,0,0"
+                                                   Text="This only teaches TARS to recognise you. It never changes how TARS sounds. Pause any TV or music while it listens." />
+                                    </StackPanel>
+                                </Border>
                                 <WrapPanel Margin="0,4,0,0">
                                     <Button Content="TRAIN ON MY VOICE" Command="{Binding TrainVoiceCommand}" Margin="0,0,6,0"
                                             ToolTip="3-2-1, then read the script on the VOICE tab (or anything) for 20 s in your normal voice. Press again to cancel" />
