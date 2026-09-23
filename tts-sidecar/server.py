@@ -75,6 +75,17 @@ class Engines:
     def load(self, name: str):
         if name in self.models:
             return self.models[name]
+        if name in GPU_ENGINES:
+            # One GPU engine at a time: switching turbo <-> chatterbox frees the other's VRAM first.
+            for other in [e for e in self.models if e in GPU_ENGINES]:
+                del self.models[other]
+                self.conds_key.pop(other, None)
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
         self.loading.add(name)
         try:
             t0 = time.time()

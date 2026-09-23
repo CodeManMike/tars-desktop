@@ -188,7 +188,28 @@ public sealed class LocalVoice : IDisposable
         }
     }
 
-    /// <summary>Kill and relaunch (engine or reference changed).</summary>
+    CancellationTokenSource? _switchCts;
+
+    /// <summary>
+    /// Change the GPU engine without restarting anything: after 1.2 s of no further changes (cycling through the
+    /// list doesn't load each one), load the new engine; the sidecar drops the other GPU engine. Kokoro covers
+    /// replies while it loads, and speech recognition is untouched.
+    /// </summary>
+    public async void SwitchEngine(string engine)
+    {
+        _switchCts?.Cancel();
+        var cts = _switchCts = new CancellationTokenSource();
+        try { await Task.Delay(1200, cts.Token); } catch (OperationCanceledException) { return; }
+        _loading = [engine];
+        UpdateState();
+        Note?.Invoke($"voice: loading {engine}…");
+        if (engine == "kokoro") await PostAsync("/unload");     // CPU voice: give the GPU back
+        await PostAsync($"/load?model={engine}", TimeSpan.FromMinutes(3));
+        await TickAsync();
+        if (!cts.IsCancellationRequested) Note?.Invoke($"voice: {engine} ready");
+    }
+
+    /// <summary>Kill and relaunch (only after installing or repairing the voice engine).</summary>
     public void RestartSidecar()
     {
         try { _proc?.Kill(true); } catch { }
@@ -209,8 +230,7 @@ public sealed class LocalVoice : IDisposable
             var url = $"{BaseUrl}/make-reference?path={Uri.EscapeDataString(DefaultReference)}";
             var r = await _http.PostAsync(url, null, cts.Token);
             r.EnsureSuccessStatusCode();
-            Note?.Invoke("voice: reference clip ready; restarting the voice engine");
-            RestartSidecar();
+            Note?.Invoke("voice: reference clip ready");
         }
         catch (Exception ex) { Log.Write($"voice: reference failed: {ex.Message}"); }
         finally { _makingReference = false; }

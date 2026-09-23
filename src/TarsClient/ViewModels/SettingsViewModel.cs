@@ -194,8 +194,8 @@ public sealed partial class SettingsViewModel : ObservableObject
             S.Tts.Engine = e;
             _main.Store.Save();
             OnPropertyChanged();
-            Say($"engine → {e}; restarting the voice sidecar");
-            _main.Voice.RestartSidecar();
+            Say($"engine → {e}: loading in the background (kokoro covers replies meanwhile)");
+            _main.Voice.SwitchEngine(e);
         }
     }
 
@@ -284,7 +284,6 @@ public sealed partial class SettingsViewModel : ObservableObject
             _lastRecording = path;
             ReferenceClip = path;
             RecordStatus = $"SAVED {Path.GetFileName(path)} · now TARS's reference voice · [PLAY IT] to check";
-            _main.Voice.RestartSidecar();
         }
         catch (OperationCanceledException) { RecordStatus = "recording cancelled"; }
         catch (Exception ex) { RecordStatus = "FAILED: " + ex.Message; }
@@ -394,8 +393,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "WAV audio|*.wav", Title = "Reference clip: 15–20 s of calm, dry reading" };
         if (dlg.ShowDialog() == true)
         {
-            ReferenceClip = dlg.FileName;
-            _main.Voice.RestartSidecar();
+            ReferenceClip = dlg.FileName;       // every request names its clip: no restart needed
         }
     }
 
@@ -404,8 +402,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         ReferenceClip = "";
         try { File.Delete(LocalVoice.DefaultReference); } catch { }
-        Say("default reference will be re-rendered locally");
-        _main.Voice.RestartSidecar();
+        Say("back to the default voice (re-rendered locally if missing)");
     }
 
     [RelayCommand]
