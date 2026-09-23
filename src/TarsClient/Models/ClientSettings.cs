@@ -37,6 +37,7 @@ public sealed class ClientSettings
     public bool NoActivate { get; set; } = true;
     public string VoiceEngine { get; set; } = "local";
     public TtsSettings Tts { get; set; } = new();
+    public SttSettings Stt { get; set; } = new();
     public string AccessKeyProtected { get; set; } = "";
 }
 
@@ -65,6 +66,15 @@ public sealed class TtsSettings
     /// <summary>Always-on friendly default: free the GPU after 10 idle minutes.</summary>
     public int IdleUnloadMinutes { get; set; } = 10;
     public Dictionary<string, int> LabRatings { get; set; } = new();
+}
+
+public sealed class SttSettings
+{
+    /// <summary>"local": Whisper on this PC via the sidecar (falls back to the server when it's down). "server": stream audio as before.</summary>
+    public string Mode { get; set; } = "local";
+    public string Model { get; set; } = "large-v3-turbo";
+    /// <summary>CPU model while a game has the GPU.</summary>
+    public string GameModel { get; set; } = "small.en";
 }
 
 [JsonSerializable(typeof(ClientSettings))]

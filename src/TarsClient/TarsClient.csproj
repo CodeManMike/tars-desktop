@@ -30,7 +30,7 @@
     <Resource Include="Assets\VT323-Regular.ttf" />
     <Resource Include="Assets\tars.ico" />
     <EmbeddedResource Include="Assets\tars-ca.crt" LogicalName="tars-ca.crt" />
-    <None Include="..\..\tts-sidecar\server.py;..\..\tts-sidecar\install.ps1;..\..\tts-sidecar\requirements.txt"
+    <None Include="..\..\tts-sidecar\*.py;..\..\tts-sidecar\install.ps1;..\..\tts-sidecar\requirements.txt"
           Link="tts-sidecar\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

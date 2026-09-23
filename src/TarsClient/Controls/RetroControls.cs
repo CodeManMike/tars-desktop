@@ -8,7 +8,7 @@ namespace TarsClient.Controls;
 
 /// <summary>
 /// A slider drawn as text: <c>HUMOR       [███████░░░] 75%</c>.
-/// Focusable; Left/Right (or wheel) step, Home/End jump, click sets. Monospace makes hit-testing simple.
+/// Focusable; Left/Right (or the wheel, once focused) step, Home/End jump, click sets.
 /// </summary>
 public sealed class BlockSlider : Control
 {
@@ -75,6 +75,8 @@ public sealed class BlockSlider : Control
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
+        // Only a slider you've selected takes the wheel; otherwise scrolling the settings page would change values.
+        if (!IsKeyboardFocused) { base.OnMouseWheel(e); return; }
         Set(Value + Math.Sign(e.Delta) * Step);
         e.Handled = true;
     }

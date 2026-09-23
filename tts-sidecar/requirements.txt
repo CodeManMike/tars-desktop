@@ -3,5 +3,6 @@ setuptools<81          # resemble-perth still imports pkg_resources
 kokoro>=0.9.4
 soundfile
 en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+faster-whisper>=1.2       # local STT (CTranslate2; uses the cuDNN/cuBLAS that ship with torch)
 fastapi>=0.115
 uvicorn>=0.30

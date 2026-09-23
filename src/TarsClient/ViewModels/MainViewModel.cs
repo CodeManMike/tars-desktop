@@ -42,6 +42,7 @@ public sealed partial class MainViewModel : ObservableObject
     public AudioDevices Devices { get; }
     public HotkeyService Hotkeys { get; }
     public LocalVoice Voice { get; }
+    public SttClient Stt { get; }
     public GameMode Game { get; }
     public AdminApi Admin { get; }
     public SettingsViewModel Settings { get; }
@@ -54,6 +55,11 @@ public sealed partial class MainViewModel : ObservableObject
     volatile bool _pttSending;
     volatile bool _handsFree;
     volatile bool _micMuted;
+    volatile bool _sttLocal;        // mic frames go to the local STT instead of the server
+    bool _serverStt;                // the server accepted {stt:"local"} and understands `utterance`
+    string _localState = "";        // hearing / transcribing, from the local VAD
+    DateTime _lastPlaybackEnd = DateTime.MinValue;
+    string[] _wakeWords = ["tars"];
     volatile float _lastRms;
     int _pttGeneration;
 
@@ -116,6 +122,8 @@ public sealed partial class MainViewModel : ObservableObject
         Hotkeys = new HotkeyService(_ui) { Swallow = S.PttSwallow };
         Game = new GameMode(() => S.Tts.GameMode);
         Voice = new LocalVoice(_ui, () => S, Playback, Game);
+        Stt = new SttClient(_ui, () => S.Tts.SidecarUrl,
+            () => Game.Active ? (S.Stt.GameModel, "cpu") : (S.Stt.Model, "cuda"));
         Settings = new SettingsViewModel(this);
 
         _typeTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) };
@@ -166,7 +174,24 @@ public sealed partial class MainViewModel : ObservableObject
         Server.Message += OnMessage;
         Server.Binary += _ => Log.Write("ws: ignored server WAV (voice is local)");
 
-        Playback.PlaybackStarted += () => { Server.SendJson(new { type = "playback", state = "start" }); RecomputeStatus(); };
+        Playback.PlaybackStarted += () =>
+        {
+            Server.SendJson(new { type = "playback", state = "start" });
+            if (_sttLocal && !_pttSending) Stt.Reset();   // never transcribe TARS's own voice
+            RecomputeStatus();
+        };
+        Playback.PlaybackEnded += () => _lastPlaybackEnd = DateTime.UtcNow;
+        Stt.ReadyChanged += _ => UpdateSttRoute();
+        Stt.SpeechChanged += speech => { _localState = speech ? "hearing" : _localState; RecomputeStatus(); };
+        Stt.Transcribing += () => { _localState = "transcribing"; RecomputeStatus(); };
+        Stt.UtteranceReady += OnUtterance;
+        Stt.Rejected += (reason, text) =>
+        {
+            _localState = "";
+            if (S.ShowDetails) Add(LineKind.Meta, $"  · ignored: \"{text}\" ({reason})");
+            RecomputeStatus();
+        };
+        Game.Changed += () => Stt.Reconfigure();
         Playback.PlaybackEnded += () => { Server.SendJson(new { type = "playback", state = "end" }); CursorVisible = _replyShown < _replyTarget.Length; RecomputeStatus(); };
 
         Capture.Frame += OnMicFrame;
@@ -174,6 +199,12 @@ public sealed partial class MainViewModel : ObservableObject
         {
             _micBlocked = blocked;
             if (blocked) Add(LineKind.Error, "MIC BLOCKED: Settings → Privacy → Microphone → Let desktop apps access your microphone");
+            RecomputeStatus();
+        };
+        Capture.EndpointMutedChanged += muted =>
+        {
+            if (muted) Add(LineKind.Error, $"MIC MUTED IN WINDOWS: {Capture.DeviceName} delivers silence. Check the mic's mute button, or click MIC to unmute");
+            else Add(LineKind.System, "MIC UNMUTED");
             RecomputeStatus();
         };
         Devices.Changed += () => { Capture.Restart(); Playback.Reopen(); };
@@ -191,6 +222,7 @@ public sealed partial class MainViewModel : ObservableObject
         Capture.Start(S.InputDevice);
         Game.Start();
         Voice.Start();
+        Stt.Start();
 
         // Provision the access key from the server's spec (allowlisted PCs only), and heal it after a rotation.
         if (string.IsNullOrWhiteSpace(S.AccessKey) || !await Admin.KeyWorksAsync())
@@ -205,6 +237,7 @@ public sealed partial class MainViewModel : ObservableObject
             else if (key == null) Add(LineKind.Error, "NO ACCESS KEY: set it under SET → SYSTEM");
         }
         Server.Start();
+        _ = LoadWakeWordsAsync();
     }
 
     void Boot(string text) => Add(LineKind.System, text);
@@ -214,7 +247,8 @@ public sealed partial class MainViewModel : ObservableObject
         IsConnected = true;
         _serverState = "idle";
         Boot($"CONNECT {new Uri(S.ServerUrl).Authority} · TLS · CA PINNED");
-        Server.SendJson(new { type = "client", name = "tars-desktop", tts = "local" });
+        _serverStt = false;
+        SendClientHello();
         Server.SendJson(new { type = "mode", mode = S.Mode });
         RecomputeStatus();
     }
@@ -283,6 +317,10 @@ public sealed partial class MainViewModel : ObservableObject
                 break;
             case "client_ok":
                 if (Str(m, "tts") != "local") Log.Write($"server acknowledged tts={Str(m, "tts")}");
+                bool serverStt = Str(m, "stt") == "local";
+                if (serverStt != _serverStt) Log.Write($"server stt={(serverStt ? "local (utterance protocol)" : "not supported: client-side gating")}");
+                _serverStt = serverStt;
+                Settings.RefreshStt();
                 break;
             case "say":
                 Voice.Say(Str(m, "speak") ?? Str(m, "text") ?? "", Str(m, "kind") ?? "reply");
@@ -391,8 +429,10 @@ public sealed partial class MainViewModel : ObservableObject
         else if (!IsConnected) tag = Server.IsDenied ? "ACCESS DENIED" : "NO CARRIER";
         else if (Playback.IsPlaying) tag = "SPEAKING";
         else if (_pttHeld) tag = "HEARING";
+        else if (_localState is "hearing" or "transcribing") tag = _localState.ToUpperInvariant();
         else if (_serverState is "hearing" or "transcribing" or "thinking") tag = _serverState.ToUpperInvariant();
         else if (_micBlocked) tag = "MIC BLOCKED";
+        else if (Capture.IsEndpointMuted) tag = "MIC MUTED";
         else if (Voice.State == VoiceState.Warming && _serverState != "idle") tag = "VOICE: WARMING";
         else tag = S.Mode == "ptt" ? "STANDBY" : "LISTENING";
         StatusTag = tag;
@@ -427,7 +467,84 @@ public sealed partial class MainViewModel : ObservableObject
             var sinceAudio = (DateTime.UtcNow.Ticks - Playback.LastAudioTicks) / TimeSpan.TicksPerMillisecond;
             send = !Playback.IsPlaying && sinceAudio > S.EchoTailMs + 60;   // + output latency
         }
-        if (send) Server.SendAudio(pcm);
+        if (!send) return;
+        if (_sttLocal) Stt.SendAudio(pcm); else Server.SendAudio(pcm);
+    }
+
+    // ================================================================== local speech-to-text
+
+    void SendClientHello()
+    {
+        bool local = S.Stt.Mode == "local" && Stt.IsReady;
+        Server.SendJson(new { type = "client", name = "tars-desktop", tts = "local", stt = local ? "local" : "server" });
+    }
+
+    /// <summary>Route the mic to the local STT when it's wanted and up; otherwise to the server as before.</summary>
+    public void UpdateSttRoute()
+    {
+        bool local = S.Stt.Mode == "local" && Stt.IsReady;
+        if (local != _sttLocal)
+        {
+            _sttLocal = local;
+            Add(LineKind.System, local ? "SPEECH RECOGNITION: LOCAL" : "SPEECH RECOGNITION: SERVER");
+            if (IsConnected) SendClientHello();
+        }
+        if (local) Stt.Reconfigure();
+        Settings.RefreshStt();
+    }
+
+    public bool SttLocal => _sttLocal;
+    public bool ServerUnderstandsUtterances => _serverStt;
+
+    void OnUtterance(Utterance u)
+    {
+        _localState = "";
+        string source = u.Source == "ptt" ? "ptt" : S.Mode;
+        if (S.ShowDetails) Add(LineKind.Meta, $"  · heard ({u.Model}, {u.SttMs} ms): {u.Text}");
+        if (_serverStt)
+        {
+            Server.SendJson(new
+            {
+                type = "utterance", text = u.Text, source, speech_ms = u.SpeechMs, stt_ms = u.SttMs,
+                logprob = u.LogProb, no_speech_prob = u.NoSpeechProb, model = u.Model,
+            });
+        }
+        else
+        {
+            // Interim gating until the server speaks `utterance`: PTT and OPEN always, WAKE needs the name
+            // or the 8 s follow-up window after TARS stopped talking.
+            bool followUp = (DateTime.UtcNow - _lastPlaybackEnd).TotalSeconds < 8;
+            bool accept = source is "ptt" or "open" || MentionsWakeWord(u.Text) || followUp;
+            if (!accept)
+            {
+                if (S.ShowDetails) Add(LineKind.Meta, $"  · ignored: \"{u.Text}\" (no wake name)");
+                RecomputeStatus();
+                return;
+            }
+            if (!IsConnected) { Add(LineKind.Error, "NO CARRIER: not sent"); return; }
+            Server.SendJson(new { type = "text", text = u.Text, speak = true });
+        }
+        RecomputeStatus();
+    }
+
+    bool MentionsWakeWord(string text)
+    {
+        var words = System.Text.RegularExpressions.Regex.Split(text.ToLowerInvariant(), @"[^a-z0-9']+");
+        return words.Any(w => _wakeWords.Contains(w));
+    }
+
+    async Task LoadWakeWordsAsync()
+    {
+        try
+        {
+            var cfg = await Admin.GetConfigAsync();
+            var ww = cfg.Fields.FirstOrDefault(f => f.Key == "WAKE_WORDS")?.Value;
+            var name = cfg.Fields.FirstOrDefault(f => f.Key == "ASSISTANT_NAME")?.Value;
+            var list = (ww ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                                 .Append(name ?? "tars").Select(w => w.ToLowerInvariant()).Distinct().ToArray();
+            if (list.Length > 0) _wakeWords = list;
+        }
+        catch (Exception ex) { Log.Write($"wake words: {ex.Message} (using \"tars\")"); }
     }
 
     [RelayCommand]
@@ -439,7 +556,8 @@ public sealed partial class MainViewModel : ObservableObject
         _pttGeneration++;
         StopSpeech();
         if (AlarmActive) StopAlarm(true);
-        Server.SendJson(new { type = "ptt", state = "start" });
+        if (_sttLocal) Stt.PttStart();
+        if (!_sttLocal || _serverStt) Server.SendJson(new { type = "ptt", state = "start" });
         _pttSending = true;
         RecomputeStatus();
     }
@@ -455,8 +573,17 @@ public sealed partial class MainViewModel : ObservableObject
         await Task.Delay(300);
         if (gen != _pttGeneration) return;
         _pttSending = false;
-        Server.SendJson(new { type = "ptt", state = "end" });
+        if (_sttLocal) Stt.PttEnd();
+        if (!_sttLocal || _serverStt) Server.SendJson(new { type = "ptt", state = "end" });
         RecomputeStatus();
+    }
+
+    /// <summary>Click on the MIC meter: offers to unmute a Windows-muted mic.</summary>
+    public async Task MicClicked()
+    {
+        if (!Capture.IsEndpointMuted) return;
+        if (!IsExpanded && !SettingsOpen) { Capture.UnmuteEndpoint(); return; }
+        if (await Settings.ConfirmAsync($"Unmute {Capture.DeviceName} in Windows?")) Capture.UnmuteEndpoint();
     }
 
     [RelayCommand]
@@ -692,6 +819,7 @@ public sealed partial class MainViewModel : ObservableObject
 
     public void Shutdown()
     {
+        Stt.Dispose();
         Store.SaveNow();
         Hotkeys.Dispose();
         Capture.Dispose();

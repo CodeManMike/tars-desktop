@@ -24,15 +24,24 @@ public sealed class AudioCapture : IDisposable
     float[] _res = [];
     readonly short[] _frame = new short[FrameSamples];
     int _framePos;
+    // one-shot diagnostics: levels in vs out over the first 5 s after (re)start
+    long _diagIn, _diagOut; double _diagInSq, _diagOutSq; long _diagUntil;
     long _lastDataTicks;
     bool _wanted;
 
     /// <summary>Frame bytes and RMS (0..1). Raised on the capture thread: keep handlers cheap.</summary>
     public event Action<byte[], float>? Frame;
+    /// <summary>Full-rate mono samples before resampling (for recording a reference clip). Capture thread.</summary>
+    public event Action<float[], int>? RawSamples;
     /// <summary>true = Windows privacy settings blocked the mic. UI thread.</summary>
     public event Action<bool>? BlockedChanged;
 
     public bool IsBlocked { get; private set; }
+    /// <summary>The endpoint is muted in Windows (or by the mic's own mute button): it delivers pure silence.</summary>
+    public bool IsEndpointMuted { get; private set; }
+    /// <summary>UI thread.</summary>
+    public event Action<bool>? EndpointMutedChanged;
+    MMDevice? _device;
     public string DeviceName { get; private set; } = "";
 
     public AudioCapture(System.Windows.Threading.Dispatcher ui)
@@ -60,11 +69,15 @@ public sealed class AudioCapture : IDisposable
         StopDevice();
         if (!_wanted) return;
         Interlocked.Exchange(ref _lastDataTicks, DateTime.UtcNow.Ticks);
+        _diagIn = _diagOut = 0; _diagInSq = _diagOutSq = 0; _diagUntil = DateTime.UtcNow.AddSeconds(5).Ticks;
         try
         {
             using var en = new MMDeviceEnumerator();
             var dev = AudioDevices.Find(en, DataFlow.Capture, _deviceId) ?? en.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
             DeviceName = dev.FriendlyName;
+            _device = dev;
+            dev.AudioEndpointVolume.OnVolumeNotification += OnEndpointVolume;
+            SetEndpointMuted(dev.AudioEndpointVolume.Mute);
             var cap = new WasapiCapture(dev, true, 30);
             _fmt = cap.WaveFormat;
             _rs = new WdlResampler();
@@ -134,12 +147,32 @@ public sealed class AudioCapture : IDisposable
             _mono[f] = sum / ch;
         }
 
+        if (RawSamples is { } raw) raw(_mono.AsSpan(0, frames).ToArray(), fmt.SampleRate);
+
+        if (_diagUntil != 0)
+        {
+            for (int f = 0; f < frames; f++) _diagInSq += _mono[f] * _mono[f];
+            _diagIn += frames;
+        }
+
         var rs = _rs!;
         int inNeeded = rs.ResamplePrepare(frames, 1, out var inBuf, out int inOff);
         Array.Copy(_mono, 0, inBuf, inOff, Math.Min(frames, inNeeded));
         int maxOut = frames * OutRate / fmt.SampleRate + 32;
         if (_res.Length < maxOut) _res = new float[maxOut];
         int outCount = rs.ResampleOut(_res, 0, Math.Min(frames, inNeeded), maxOut, 1);
+
+        if (_diagUntil != 0)
+        {
+            for (int i = 0; i < outCount; i++) _diagOutSq += _res[i] * _res[i];
+            _diagOut += outCount;
+            if (DateTime.UtcNow.Ticks > _diagUntil)
+            {
+                _diagUntil = 0;
+                static string Db(double sq, long n) => n == 0 ? "-inf" : $"{10 * Math.Log10(Math.Max(sq / n, 1e-12)):0.0}";
+                Log.Write($"mic check: in {_diagIn} samples @ {fmt.SampleRate} Hz, {Db(_diagInSq, _diagIn)} dBFS → out {_diagOut} @ 16000 Hz, {Db(_diagOutSq, _diagOut)} dBFS");
+            }
+        }
 
         for (int i = 0; i < outCount; i++)
         {
@@ -158,8 +191,30 @@ public sealed class AudioCapture : IDisposable
         }
     }
 
+    void OnEndpointVolume(AudioVolumeNotificationData data) => SetEndpointMuted(data.Muted);
+
+    void SetEndpointMuted(bool muted)
+    {
+        if (IsEndpointMuted == muted) return;
+        IsEndpointMuted = muted;
+        Log.Write($"capture: endpoint {(muted ? "MUTED in Windows" : "unmuted")}");
+        _ui.BeginInvoke(() => EndpointMutedChanged?.Invoke(muted));
+    }
+
+    /// <summary>User asked to unmute the Windows endpoint.</summary>
+    public void UnmuteEndpoint()
+    {
+        try { if (_device != null) _device.AudioEndpointVolume.Mute = false; }
+        catch (Exception ex) { Log.Write($"capture: unmute failed: {ex.Message}"); }
+    }
+
     void StopDevice()
     {
+        if (_device != null)
+        {
+            try { _device.AudioEndpointVolume.OnVolumeNotification -= OnEndpointVolume; } catch { }
+            _device = null;
+        }
         var cap = _cap;
         _cap = null;
         if (cap == null) return;

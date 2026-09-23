@@ -268,6 +268,31 @@
                                 </DockPanel>
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
                                            Text="15–20 s WAV of calm, dry, deadpan reading: your voice or a consenting friend's. Empty = an original deep voice rendered locally. Don't use film clips of real actors." />
+                                <Border BorderBrush="{StaticResource FgDim}" BorderThickness="1" Padding="6,4" Margin="0,6,0,2">
+                                    <StackPanel>
+                                        <TextBlock Text="RECORD YOUR OWN · read this, flat and unhurried, like reading a status report:" Foreground="{StaticResource FgBright}" />
+                                        <TextBlock Text="{x:Static vm:SettingsViewModel.ReferenceScript}" TextWrapping="Wrap" Margin="0,4,0,6" />
+                                        <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
+                                                   Text="Quiet room · mouth about a hand-width from the mic · low, calm voice · no smile · same pace throughout · pause briefly before the jokes." />
+                                        <WrapPanel Margin="0,4,0,0">
+                                            <Button Command="{Binding RecordReferenceCommand}" Margin="0,0,6,0"
+                                                    ToolTip="3-2-1, then 20 seconds of recording. Saved to %APPDATA%\TARS\voices and used straight away (press again to cancel)">
+                                                <Button.Style>
+                                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                                        <Setter Property="Content" Value="● RECORD 20 s" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Recording}" Value="True">
+                                                                <Setter Property="Content" Value="■ STOP" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Button.Style>
+                                            </Button>
+                                            <Button Content="► PLAY IT" Command="{Binding PlayRecordingCommand}" ToolTip="Hear the recording (your raw voice, not TARS)" />
+                                        </WrapPanel>
+                                        <TextBlock Text="{Binding RecordStatus}" Foreground="{StaticResource FgBright}" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
                                 <TextBlock Style="{StaticResource Head}" Text="DELIVERY" />
                                 <c:BlockSlider Label="SPEED" Value="{Binding VoiceSpeed}" Minimum="70" Maximum="130" Step="5" Cells="12"
                                                ToolTip="Speaking rate. TARS is measured: 90-100 %" />
@@ -343,6 +368,12 @@
                                     <Button DockPanel.Dock="Right" Content="CAPTURE" Command="{Binding CaptureStopCommand}" ToolTip="Press the key combination that silences TARS and dismisses alarms" />
                                     <TextBlock Text="{Binding StopHotkey}" Foreground="{StaticResource FgBright}" />
                                 </DockPanel>
+                                <TextBlock Style="{StaticResource Head}" Text="SPEECH RECOGNITION" />
+                                <TextBlock><Run Text="STT           " /><Run Text="{Binding SttStatus, Mode=OneWay}" Foreground="{StaticResource FgBright}" /></TextBlock>
+                                <c:ChoiceRow Label="RECOGNITION" Items="{x:Static vm:SettingsViewModel.SttModes}" SelectedIndex="{Binding SttModeIndex}"
+                                             ToolTip="LOCAL: Whisper on this PC's GPU (more accurate, nothing leaves the PC until it's text). SERVER: stream audio as before" />
+                                <c:ChoiceRow Label="STT MODEL" Items="{x:Static vm:SettingsViewModel.SttModels}" SelectedIndex="{Binding SttModelIndex}"
+                                             ToolTip="large-v3-turbo: best accuracy, ~1.6 GB VRAM, ~0.2-0.4 s. small.en: CPU, used automatically in game mode" />
                                 <CheckBox Content="MUTE MIC" IsChecked="{Binding DataContext.MicMuted, RelativeSource={RelativeSource AncestorType=Window}}" />
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap" Margin="0,8,0,0"
                                            Text="Hold the PTT key anywhere, even in a game. In the window, holding SPACE also talks. Mouse 4/5 work too." />
@@ -533,8 +564,11 @@
                                     PreviewMouseLeftButtonDown="Ptt_Down" PreviewMouseLeftButtonUp="Ptt_Up" LostMouseCapture="Ptt_Lost" />
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Background="Transparent" ClipToBounds="True">
-                            <TextBlock Text="MIC " Style="{StaticResource Dim}" ToolTip="Microphone level" />
-                            <c:CellMeter Cells="8" Level="{Binding MicLevel}" ToolTip="Microphone level" Margin="0,0,10,0" />
+                            <StackPanel Orientation="Horizontal" Background="Transparent" MouseLeftButtonUp="Mic_Click"
+                                        ToolTip="Microphone level (click to unmute if Windows has it muted)">
+                                <TextBlock Text="MIC " Style="{StaticResource Dim}" />
+                                <c:CellMeter Cells="8" Level="{Binding MicLevel}" Margin="0,0,10,0" />
+                            </StackPanel>
                             <StackPanel Orientation="Horizontal" Background="Transparent" MouseWheel="Volume_MouseWheel" ToolTip="TARS volume: scroll to change (0–150 %)">
                                 <TextBlock Text="VOL " Style="{StaticResource Dim}" />
                                 <c:CellMeter Cells="9" Level="{Binding VolumeLevel}" Hot="{Binding VolumeHot}" />

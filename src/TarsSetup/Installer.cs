@@ -106,7 +106,8 @@ public static class Installer
         }
 
         log("DONE.");
-        if (o.Launch) Process.Start(new ProcessStartInfo(AppExe) { UseShellExecute = true, WorkingDirectory = InstallDir });
+        // Through Explorer, so TARS (and its voice sidecar) never inherit this process's tree or job.
+        if (o.Launch) Process.Start(new ProcessStartInfo("explorer.exe", $"\"{AppExe}\"") { UseShellExecute = false });
     }
 
     public static async Task UninstallAsync(bool removeData, Action<string> log)

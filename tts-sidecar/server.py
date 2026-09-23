@@ -9,6 +9,8 @@ Engines:
   kokoro     hexgrad/Kokoro-82M           CPU. light: game mode and fallback; also renders the default reference clip
 All voice generation is local: nothing here talks to the TARS server.
 
+Speech-to-text (stt.py): /stt/stream WebSocket, Silero VAD + faster-whisper (large-v3-turbo on the GPU).
+
 Audio: 24 kHz mono. response_format "pcm" streams raw Int16 LE sentence by sentence (header X-Sample-Rate);
 "wav" returns one complete file.
 """
@@ -180,15 +182,19 @@ def sentences(text: str) -> list[str]:
     return parts
 
 
-def build_app(engines: Engines) -> FastAPI:
+def build_app(engines: Engines, transcriber=None) -> FastAPI:
     app = FastAPI(title="TARS voice sidecar")
+    if transcriber is not None:
+        import stt
+        stt.mount(app, transcriber)
 
     @app.get("/health")
     def health():
         info = {"ok": True, "engine": engines.default, "engines": list(ENGINES),
                 "loaded": sorted(engines.models), "loading": sorted(engines.loading),
                 "device": engines.device, "sample_rate": SAMPLE_RATE,
-                "idle_s": round(time.time() - engines.last_use)}
+                "idle_s": round(time.time() - engines.last_use),
+                "stt": getattr(app.state, "transcriber", None) and app.state.transcriber.loaded}
         try:
             import torch
             if torch.cuda.is_available():
@@ -261,6 +267,7 @@ def main():
     ap.add_argument("--ref", default=None, help="default reference clip (wav)")
     ap.add_argument("--device", default=None)
     ap.add_argument("--no-warm", action="store_true")
+    ap.add_argument("--no-stt", action="store_true")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout,
@@ -282,7 +289,14 @@ def main():
                 log.exception("warm-up failed")
         threading.Thread(target=warm, daemon=True).start()
 
-    uvicorn.run(build_app(engines), host=args.host, port=args.port, log_level="warning")
+    transcriber = None
+    if not args.no_stt:
+        sys.path.insert(0, str(Path(__file__).parent))
+        import stt
+        transcriber = stt.Transcriber()
+    app = build_app(engines, transcriber)
+    app.state.transcriber = transcriber
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

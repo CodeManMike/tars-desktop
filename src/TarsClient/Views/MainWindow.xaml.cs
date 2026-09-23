@@ -431,6 +431,8 @@ public partial class MainWindow : Window
 
     // ================================================================== footer
 
+    void Mic_Click(object sender, MouseButtonEventArgs e) => _ = _vm.MicClicked();
+
     void Volume_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         _vm.NudgeVolume(Math.Sign(e.Delta));

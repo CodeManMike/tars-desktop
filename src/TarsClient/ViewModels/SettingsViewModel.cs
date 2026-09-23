@@ -241,6 +241,70 @@ public sealed partial class SettingsViewModel : ObservableObject
     public bool GameModeEnabled { get => S.Tts.GameMode; set { S.Tts.GameMode = value; _main.Store.Save(); OnPropertyChanged(); } }
     public double IdleUnload { get => S.Tts.IdleUnloadMinutes; set { S.Tts.IdleUnloadMinutes = (int)value; _main.Store.Save(); OnPropertyChanged(); } }
 
+    // ---- record your own reference clip
+
+    public const string ReferenceScript =
+        "Good evening. All systems are running within normal parameters. " +
+        "The weather tomorrow is fog, with a high of nineteen degrees and a low of fourteen. " +
+        "Your rice timer is set for twelve minutes. I checked the numbers twice. They are still the numbers. " +
+        "Honesty setting: ninety percent. Humor: seventy-five. That was a joke. You'll know the next one by the pause.";
+
+    [ObservableProperty] public partial bool Recording { get; set; }
+    [ObservableProperty] public partial string RecordStatus { get; set; } = "";
+    string? _lastRecording;
+    CancellationTokenSource? _recCts;
+
+    [RelayCommand]
+    async Task RecordReference()
+    {
+        if (Recording) { _recCts?.Cancel(); return; }
+        if (_main.Capture.IsEndpointMuted) { Say("the mic is muted in Windows: click MIC in the footer first"); return; }
+        Recording = true;
+        _recCts = new CancellationTokenSource();
+        var rec = new ReferenceRecorder(_main.Capture);
+        bool wasMuted = _main.MicMuted;
+        _main.MicMuted = true;                         // don't send this to TARS
+        _main.Playback.Stop();
+        try
+        {
+            for (int i = 3; i > 0; i--) { RecordStatus = $"GET READY… {i}"; await Task.Delay(1000, _recCts.Token); }
+            var started = DateTime.UtcNow;
+            var ticker = Task.Run(async () =>
+            {
+                while (!_recCts.IsCancellationRequested)
+                {
+                    int left = 20 - (int)(DateTime.UtcNow - started).TotalSeconds;
+                    int cells = (int)Math.Round(Math.Min(1, rec.Level * 1.4) * 10);
+                    _main.Dispatch(() => RecordStatus = $"● REC {Math.Max(0, left):00}s  [{new string('█', cells)}{new string('░', 10 - cells)}]  read the script above");
+                    await Task.Delay(150);
+                }
+            });
+            var path = await rec.RecordAsync(TimeSpan.FromSeconds(20), Path.Combine(SettingsStore.Folder, "voices"), _recCts.Token);
+            _recCts.Cancel();
+            _lastRecording = path;
+            ReferenceClip = path;
+            RecordStatus = $"SAVED {Path.GetFileName(path)} · now TARS's reference voice · [PLAY IT] to check";
+            _main.Voice.RestartSidecar();
+        }
+        catch (OperationCanceledException) { RecordStatus = "recording cancelled"; }
+        catch (Exception ex) { RecordStatus = "FAILED: " + ex.Message; }
+        finally
+        {
+            _recCts?.Cancel();
+            _main.MicMuted = wasMuted;
+            Recording = false;
+        }
+    }
+
+    [RelayCommand]
+    void PlayRecording()
+    {
+        var path = _lastRecording ?? (File.Exists(S.Tts.ReferenceClip) ? S.Tts.ReferenceClip : null);
+        if (path == null) { RecordStatus = "nothing recorded yet"; return; }
+        _main.Playback.Stop();
+        _main.Playback.EnqueueWav(File.ReadAllBytes(path));
+    }
+
     [RelayCommand]
     void BrowseReference()
     {
@@ -387,6 +451,44 @@ public sealed partial class SettingsViewModel : ObservableObject
             _main.Playback.Open(d.Id);
             OnPropertyChanged();
         }
+    }
+
+    // ---- speech recognition
+    public static readonly string[] SttModes = ["LOCAL (this PC)", "SERVER"];
+    public static readonly string[] SttModels = ["large-v3-turbo", "small.en"];
+
+    public int SttModeIndex
+    {
+        get => S.Stt.Mode == "server" ? 1 : 0;
+        set
+        {
+            S.Stt.Mode = (value % 2 + 2) % 2 == 1 ? "server" : "local";
+            _main.Store.Save();
+            _main.UpdateSttRoute();
+            OnPropertyChanged();
+        }
+    }
+
+    public int SttModelIndex
+    {
+        get => Math.Max(0, Array.IndexOf(SttModels, S.Stt.Model));
+        set
+        {
+            S.Stt.Model = SttModels[(value % SttModels.Length + SttModels.Length) % SttModels.Length];
+            _main.Store.Save();
+            _main.Stt.Reconfigure();
+            OnPropertyChanged();
+        }
+    }
+
+    [ObservableProperty] public partial string SttStatus { get; set; } = "";
+
+    public void RefreshStt()
+    {
+        SttStatus = !_main.SttLocal
+            ? (S.Stt.Mode == "local" ? "SERVER (voice sidecar not up yet)" : "SERVER")
+            : $"LOCAL · {(_main.Game.Active ? S.Stt.GameModel + " · cpu (game mode)" : S.Stt.Model + " · cuda")} · " +
+              (_main.ServerUnderstandsUtterances ? "server gating" : "client gating (interim)");
     }
 
     public double EchoTail { get => S.EchoTailMs; set { S.EchoTailMs = (int)value; _main.Store.Save(); OnPropertyChanged(); } }

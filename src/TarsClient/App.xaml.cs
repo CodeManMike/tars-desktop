@@ -103,6 +103,7 @@ public partial class App : Application
 
         vm.PropertyChanged += (_, e) =>
         {
+            if (_quitting) return;
             if (e.PropertyName is nameof(MainViewModel.StatusTag) or nameof(MainViewModel.AssistantName))
                 _tray.ToolTipText = $"{vm.AssistantName} · {vm.StatusTag}";
         };
@@ -123,8 +124,11 @@ public partial class App : Application
         _muteItem!.IsChecked = vm.MicMuted;
     }
 
+    bool _quitting;
+
     void Quit()
     {
+        _quitting = true;
         Log.Write("quit");
         _vm?.Shutdown();
         _tray?.Dispose();
