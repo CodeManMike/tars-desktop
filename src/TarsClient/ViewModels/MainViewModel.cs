@@ -521,7 +521,10 @@ public sealed partial class MainViewModel : ObservableObject
         {
             Server.SendJson(new
             {
+                // started_ms_ago: how long ago the speech began, so the follow-up window is judged from the start
+                // of what you said, not from when a long sentence finished transcribing.
                 type = "utterance", text = u.Text, source, speech_ms = u.SpeechMs, stt_ms = u.SttMs,
+                duration_ms = u.DurationMs, started_ms_ago = u.DurationMs + u.SttMs,
                 logprob = u.LogProb, no_speech_prob = u.NoSpeechProb, model = u.Model,
             });
         }
@@ -529,7 +532,8 @@ public sealed partial class MainViewModel : ObservableObject
         {
             // Interim gating until the server speaks `utterance`: PTT and OPEN always, WAKE needs the name
             // or the 8 s follow-up window after TARS stopped talking.
-            bool followUp = (DateTime.UtcNow - _lastPlaybackEnd).TotalSeconds < 8;
+            var startedAt = DateTime.UtcNow - TimeSpan.FromMilliseconds(u.DurationMs + u.SttMs);
+            bool followUp = (startedAt - _lastPlaybackEnd).TotalSeconds < 8;
             bool accept = source is "ptt" or "open" || MentionsWakeWord(u.Text) || followUp;
             if (!accept)
             {

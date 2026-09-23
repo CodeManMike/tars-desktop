@@ -40,7 +40,9 @@ MIN_SPEECH_MS = 250             # Silero-voiced time
 MIN_CLIP_MS = 300               # whole clip
 HANGOVER_MS = 900               # silence that ends an utterance (natural mid-sentence pauses survive)
 MAX_UTTERANCE_S = 25
-LOCK_MIN_MS = 1500              # voiceprints are unreliable on shorter clips (a lone "TARS" scores like a stranger)
+LOCK_MIN_MS = 2000              # voiceprints are unreliable on shorter clips (a lone "TARS" scores like a stranger)
+ADAPT_MIN_MS = 2000             # PTT speech this long refines the voiceprint (PTT is always the owner)
+ADAPT_RATE = 0.1
 NAME_ONLY = re.compile(r"^\W*(hey |ok |okay |yo )?(tars|tarz|tarss)\W*$", re.I)
 GATE_FLOOR_MIN = 10 ** (-62 / 20)   # adaptive gate: skip Silero while the level is within ~6 dB of the noise floor
 GATE_OVER_FLOOR = 2.0                # +6 dB
@@ -111,6 +113,17 @@ class SpeakerLock:
         np.save(out_path, e)
         self.profiles.pop(out_path, None)
         return {"ok": True, "seconds": round(len(a) / RATE, 1), "speech_s": round(voiced_s, 1), "out": out_path}
+
+    def adapt(self, profile_path: str, audio16k: np.ndarray):
+        """Blend a known-owner clip (PTT) into the voiceprint, so it learns the owner's everyday voice."""
+        prof = self.profiles.get(profile_path)
+        if prof is None:
+            prof = np.load(profile_path)
+        e = self.embed(audio16k)
+        new = (1 - ADAPT_RATE) * prof + ADAPT_RATE * e
+        new = new / np.linalg.norm(new)
+        np.save(profile_path, new)
+        self.profiles[profile_path] = new
 
     def similarity(self, profile_path: str, audio16k: np.ndarray) -> float:
         prof = self.profiles.get(profile_path)
@@ -307,7 +320,10 @@ class Session:
         if voiced_ms < MIN_SPEECH_MS or len(audio) * 1000 / RATE < MIN_CLIP_MS:
             await self.send({"type": "rejected", "reason": f"no speech ({voiced_ms} ms voiced)", "text": ""})
             return
+        duration_ms = round(len(audio) * 1000 / RATE)
         sim = None
+        if source == "ptt" and self.speaker and voiced_ms >= ADAPT_MIN_MS:
+            asyncio.get_running_loop().run_in_executor(None, SPEAKERS.adapt, self.speaker, audio)
         if source == "vad" and self.speaker and voiced_ms >= LOCK_MIN_MS:
             try:
                 sim = await asyncio.get_running_loop().run_in_executor(None, SPEAKERS.similarity, self.speaker, audio)
@@ -336,6 +352,7 @@ class Session:
         log.info("stt: %s %d ms (%s ms stt, lp %.2f%s): %r", source, voiced_ms, r["stt_ms"], r["logprob"],
                  "" if sim is None else f", voice {sim:.2f}", text)
         await self.send({"type": "utterance", "text": text, "source": source, "speech_ms": voiced_ms,
+                         "duration_ms": duration_ms,
                          "speaker_sim": None if sim is None else round(sim, 3), **r})
 
 

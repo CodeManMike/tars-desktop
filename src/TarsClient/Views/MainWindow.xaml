@@ -395,7 +395,7 @@
                                 <CheckBox Content="VOICE LOCK ON" IsChecked="{Binding VoiceLock}"
                                           ToolTip="Hands-free (wake/open) turns must match your voiceprint" />
                                 <c:BlockSlider Label="STRICTNESS" Value="{Binding SpeakerThreshold}" Minimum="50" Maximum="95" Step="1" Cells="15" Unit=""
-                                               ToolTip="How close a voice must be to yours. Tested: you ~90, other voices ~60. Lower if it ignores you, raise if others get through" />
+                                               ToolTip="How close a voice must be to yours. Measured: you 70-94, TV voices 49-65. Lower if it ignores you, raise if others get through. Push-to-talk speech keeps refining your voiceprint" />
                                 <CheckBox Content="MUTE MIC" IsChecked="{Binding DataContext.MicMuted, RelativeSource={RelativeSource AncestorType=Window}}" />
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap" Margin="0,8,0,0"
                                            Text="Hold the PTT key (Right Ctrl by default) anywhere, even in a game. In the window, holding SPACE also talks." />

@@ -39,6 +39,8 @@ public sealed class SettingsStore
         }
         Current.AccessKey = Unprotect(Current.AccessKeyProtected);
         if (Current.PttKey.StartsWith("Mouse", StringComparison.OrdinalIgnoreCase)) Current.PttKey = "RightCtrl";
+        // 0.72 was the first default and rejected the owner's relaxed speech (0.70-0.76 in real use).
+        if (Math.Abs(Current.Stt.SpeakerThreshold - 0.72) < 0.001) Current.Stt.SpeakerThreshold = 0.67;
     }
 
     /// <summary>Saves shortly after the last change (slider drags don't hammer the disk).</summary>

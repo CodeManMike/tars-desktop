@@ -78,7 +78,7 @@ public sealed class SttSettings
     /// <summary>Only your voice (voiceprint) starts hands-free turns; YouTube/TV/other people are dropped before Whisper.</summary>
     public bool VoiceLock { get; set; }
     public string Voiceprint { get; set; } = "";
-    public double SpeakerThreshold { get; set; } = 0.72;
+    public double SpeakerThreshold { get; set; } = 0.67;
 }
 
 [JsonSerializable(typeof(ClientSettings))]

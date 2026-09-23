@@ -19,7 +19,10 @@ public static class Log
                 if (fi.Exists && fi.Length > 1_000_000) File.Move(PathName, PathName + ".1", true);
                 File.AppendAllText(PathName, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {line}{Environment.NewLine}");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tars-log-failure.txt"), $"{DateTime.Now:HH:mm:ss} {PathName}: {ex}{Environment.NewLine}"); } catch { }
+            }
         }
     }
 }

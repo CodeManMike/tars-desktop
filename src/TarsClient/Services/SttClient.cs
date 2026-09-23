@@ -8,7 +8,7 @@ using System.Windows.Threading;
 namespace TarsClient.Services;
 
 /// <summary>A finished, transcribed utterance from the local STT.</summary>
-public sealed record Utterance(string Text, string Source, int SpeechMs, int SttMs, double LogProb, double NoSpeechProb, string Model);
+public sealed record Utterance(string Text, string Source, int SpeechMs, int DurationMs, int SttMs, double LogProb, double NoSpeechProb, string Model);
 
 /// <summary>
 /// Local speech-to-text: streams mic frames to the sidecar's /stt/stream (Silero VAD + faster-whisper)
@@ -143,7 +143,8 @@ public sealed class SttClient : IDisposable
                 _ = _ui.BeginInvoke(() => Transcribing?.Invoke());
                 break;
             case "utterance":
-                var u = new Utterance(S("text"), S("source"), (int)D("speech_ms"), (int)D("stt_ms"), D("logprob"), D("no_speech_prob"), S("model"));
+                var u = new Utterance(S("text"), S("source"), (int)D("speech_ms"), (int)D("duration_ms"), (int)D("stt_ms"),
+                                      D("logprob"), D("no_speech_prob"), S("model"));
                 _ = _ui.BeginInvoke(() => UtteranceReady?.Invoke(u));
                 break;
             case "rejected":
