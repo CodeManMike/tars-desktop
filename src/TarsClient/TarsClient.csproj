@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>TARS</AssemblyName>
+    <RootNamespace>TarsClient</RootNamespace>
+    <ApplicationIcon>Assets\tars.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.0.0</Version>
+    <Product>TARS Desktop</Product>
+    <Company>Michael</Company>
+    <Description>TARS desktop client</Description>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="H.NotifyIcon.Wpf" Version="2.3.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="System.Speech" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\VT323-Regular.ttf" />
+    <Resource Include="Assets\tars.ico" />
+    <EmbeddedResource Include="Assets\tars-ca.crt" LogicalName="tars-ca.crt" />
+    <None Include="..\..\tts-sidecar\server.py;..\..\tts-sidecar\install.ps1;..\..\tts-sidecar\requirements.txt"
+          Link="tts-sidecar\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

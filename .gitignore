@@ -1,0 +1,20 @@
+# build output
+bin/
+obj/
+artifacts/
+*.user
+.vs/
+
+# never commit client state or secrets
+client.json
+*.log
+.env
+voices/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# local tooling
+.claude/

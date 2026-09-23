@@ -1,0 +1,66 @@
+<Window x:Class="TarsSetup.SetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TARS Setup" Width="640" Height="440" MinWidth="480" MinHeight="340"
+        WindowStyle="None" ResizeMode="CanResize" WindowStartupLocation="CenterScreen"
+        Background="{StaticResource Bg}" Foreground="{StaticResource Fg}"
+        FontFamily="{StaticResource TermFont}" FontSize="20"
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="28" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False" />
+    </WindowChrome.WindowChrome>
+
+    <Border BorderBrush="{StaticResource Fg}" BorderThickness="1">
+        <Grid>
+            <Grid Effect="{StaticResource Glow}" Margin="8,0,8,8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="28" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="×" Click="Close_Click" WindowChrome.IsHitTestVisibleInChrome="True" VerticalAlignment="Center" />
+                    <TextBlock VerticalAlignment="Center"><Run Text="■ TARS SETUP" /><Run x:Name="VersionRun" Foreground="{StaticResource FgDim}" /></TextBlock>
+                </DockPanel>
+
+                <StackPanel Grid.Row="1" x:Name="Header">
+                    <TextBlock x:Name="Banner" Foreground="{StaticResource FgBright}" FontFamily="Consolas" FontSize="11" Margin="0,4,0,6" xml:space="preserve"> ████████╗  █████╗  ██████╗  ███████╗
+ ╚══██╔══╝ ██╔══██╗ ██╔══██╗ ██╔════╝
+    ██║    ███████║ ██████╔╝ ███████╗
+    ██║    ██╔══██║ ██╔══██╗ ╚════██║
+    ██║    ██║  ██║ ██║  ██║ ███████║
+    ╚═╝    ╚═╝  ╚═╝ ╚═╝  ╚═╝ ╚══════╝</TextBlock>
+                    <TextBlock x:Name="Subtitle" TextWrapping="Wrap" Style="{x:Null}" Foreground="{StaticResource FgDim}"
+                               Text="DESKTOP CLIENT" />
+                </StackPanel>
+
+                <!-- options (install) -->
+                <StackPanel Grid.Row="2" x:Name="OptionsPanel" Margin="0,10,0,0">
+                    <TextBlock><Run Text="TARGET        " /><Run x:Name="TargetRun" Foreground="{StaticResource FgBright}" /></TextBlock>
+                    <CheckBox x:Name="StartupBox" Content="START WITH WINDOWS (minimized to the tray)" IsChecked="True" Margin="0,8,0,0" />
+                    <CheckBox x:Name="DesktopBox" Content="DESKTOP SHORTCUT" IsChecked="False" />
+                    <CheckBox x:Name="VoiceBox" Content="INSTALL THE LOCAL VOICE ENGINE (GPU, ≈4.5 GB download)" IsChecked="True" />
+                    <CheckBox x:Name="LaunchBox" Content="LAUNCH TARS WHEN DONE" IsChecked="True" />
+                    <CheckBox x:Name="RemoveDataBox" Content="ALSO REMOVE SETTINGS AND THE VOICE ENGINE" Visibility="Collapsed" />
+                    <TextBlock x:Name="Note" TextWrapping="Wrap" Foreground="{StaticResource FgDim}" Margin="0,10,0,0" />
+                </StackPanel>
+
+                <!-- progress log -->
+                <ScrollViewer Grid.Row="2" x:Name="LogScroll" Visibility="Collapsed" Margin="0,10,0,0" VerticalScrollBarVisibility="Auto">
+                    <TextBlock x:Name="LogText" TextWrapping="Wrap" FontSize="17" />
+                </ScrollViewer>
+
+                <DockPanel Grid.Row="3" Margin="0,6,0,0">
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button x:Name="GoButton" Content="INSTALL" Click="Go_Click" IsDefault="True" />
+                        <Button x:Name="CancelButton" Content="CANCEL" Click="Close_Click" IsCancel="True" />
+                    </StackPanel>
+                    <TextBlock x:Name="Status" Foreground="{StaticResource FgBright}" VerticalAlignment="Center" />
+                </DockPanel>
+            </Grid>
+            <Rectangle Fill="{StaticResource ScanlineBrush}" IsHitTestVisible="False" />
+        </Grid>
+    </Border>
+</Window>
