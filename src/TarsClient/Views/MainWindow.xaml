@@ -374,6 +374,18 @@
                                              ToolTip="LOCAL: Whisper on this PC's GPU (more accurate, nothing leaves the PC until it's text). SERVER: stream audio as before" />
                                 <c:ChoiceRow Label="STT MODEL" Items="{x:Static vm:SettingsViewModel.SttModels}" SelectedIndex="{Binding SttModelIndex}"
                                              ToolTip="large-v3-turbo: best accuracy, ~1.6 GB VRAM, ~0.2-0.4 s. small.en: CPU, used automatically in game mode" />
+                                <TextBlock Style="{StaticResource Head}" Text="VOICE LOCK · only you can wake TARS" />
+                                <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap"
+                                           Text="With YouTube or a TV on, TARS only reacts to your voice. It learns you from one 20 s reading; anything else is dropped before speech recognition runs. Push-to-talk always works." />
+                                <WrapPanel Margin="0,4,0,0">
+                                    <Button Content="TRAIN ON MY VOICE" Command="{Binding TrainVoiceCommand}" Margin="0,0,6,0"
+                                            ToolTip="3-2-1, then read the script on the VOICE tab (or anything) for 20 s in your normal voice. Press again to cancel" />
+                                </WrapPanel>
+                                <TextBlock Text="{Binding EnrollStatus}" Foreground="{StaticResource FgBright}" TextWrapping="Wrap" />
+                                <CheckBox Content="VOICE LOCK ON" IsChecked="{Binding VoiceLock}"
+                                          ToolTip="Hands-free (wake/open) turns must match your voiceprint" />
+                                <c:BlockSlider Label="STRICTNESS" Value="{Binding SpeakerThreshold}" Minimum="50" Maximum="95" Step="1" Cells="15" Unit=""
+                                               ToolTip="How close a voice must be to yours. Tested: you ~90, other voices ~60. Lower if it ignores you, raise if others get through" />
                                 <CheckBox Content="MUTE MIC" IsChecked="{Binding DataContext.MicMuted, RelativeSource={RelativeSource AncestorType=Window}}" />
                                 <TextBlock Style="{StaticResource Dim}" TextWrapping="Wrap" Margin="0,8,0,0"
                                            Text="Hold the PTT key anywhere, even in a game. In the window, holding SPACE also talks. Mouse 4/5 work too." />

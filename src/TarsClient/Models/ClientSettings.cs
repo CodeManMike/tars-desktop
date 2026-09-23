@@ -75,6 +75,10 @@ public sealed class SttSettings
     public string Model { get; set; } = "large-v3-turbo";
     /// <summary>CPU model while a game has the GPU.</summary>
     public string GameModel { get; set; } = "small.en";
+    /// <summary>Only your voice (voiceprint) starts hands-free turns; YouTube/TV/other people are dropped before Whisper.</summary>
+    public bool VoiceLock { get; set; }
+    public string Voiceprint { get; set; } = "";
+    public double SpeakerThreshold { get; set; } = 0.72;
 }
 
 [JsonSerializable(typeof(ClientSettings))]

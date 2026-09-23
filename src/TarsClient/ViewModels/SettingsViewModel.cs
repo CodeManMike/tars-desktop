@@ -296,6 +296,81 @@ public sealed partial class SettingsViewModel : ObservableObject
         }
     }
 
+    // ---- voice lock: a voiceprint so only you start hands-free turns
+
+    public bool VoiceLock
+    {
+        get => S.Stt.VoiceLock;
+        set
+        {
+            if (value && !File.Exists(S.Stt.Voiceprint)) { Say("train it first: [TRAIN ON MY VOICE]"); OnPropertyChanged(); return; }
+            S.Stt.VoiceLock = value;
+            _main.Store.Save();
+            _main.Stt.Reconfigure();
+            OnPropertyChanged();
+        }
+    }
+
+    public double SpeakerThreshold
+    {
+        get => Math.Round(S.Stt.SpeakerThreshold * 100);
+        set { S.Stt.SpeakerThreshold = value / 100; _main.Store.Save(); _main.Stt.Reconfigure(); OnPropertyChanged(); }
+    }
+
+    [ObservableProperty] public partial string EnrollStatus { get; set; } = "";
+
+    [RelayCommand]
+    async Task TrainVoice()
+    {
+        if (Recording) { _recCts?.Cancel(); return; }
+        if (!_main.Voice.Healthy) { EnrollStatus = "the voice engine isn't running"; return; }
+        if (_main.Capture.IsEndpointMuted) { EnrollStatus = "the mic is muted in Windows: click MIC in the footer first"; return; }
+        Recording = true;
+        _recCts = new CancellationTokenSource();
+        var rec = new ReferenceRecorder(_main.Capture);
+        bool wasMuted = _main.MicMuted;
+        _main.MicMuted = true;
+        _main.Playback.Stop();
+        try
+        {
+            for (int i = 3; i > 0; i--) { EnrollStatus = $"GET READY… {i}  (read the script above in your normal voice)"; await Task.Delay(1000, _recCts.Token); }
+            var started = DateTime.UtcNow;
+            _ = Task.Run(async () =>
+            {
+                while (!_recCts.IsCancellationRequested)
+                {
+                    int left = 20 - (int)(DateTime.UtcNow - started).TotalSeconds;
+                    int cells = (int)Math.Round(Math.Min(1, rec.Level * 1.4) * 10);
+                    _main.Dispatch(() => EnrollStatus = $"● LISTENING {Math.Max(0, left):00}s  [{new string('█', cells)}{new string('░', 10 - cells)}]");
+                    await Task.Delay(150);
+                }
+            });
+            var folder = Path.Combine(SettingsStore.Folder, "voices");
+            var wav = await rec.RecordAsync(TimeSpan.FromSeconds(20), folder, _recCts.Token);
+            _recCts.Cancel();
+            var npy = Path.Combine(folder, "voiceprint.npy");
+            EnrollStatus = "building voiceprint…";
+            using var http = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+            var resp = await http.PostAsync(S.Tts.SidecarUrl.TrimEnd('/') + "/stt/enroll",
+                System.Net.Http.Json.JsonContent.Create(new { wav, @out = npy }));
+            resp.EnsureSuccessStatusCode();
+            S.Stt.Voiceprint = npy;
+            S.Stt.VoiceLock = true;
+            _main.Store.Save();
+            _main.Stt.Reconfigure();
+            OnPropertyChanged(nameof(VoiceLock));
+            EnrollStatus = "VOICE LOCK ON: hands-free turns now need your voice (push-to-talk always works)";
+        }
+        catch (OperationCanceledException) { EnrollStatus = "cancelled"; }
+        catch (Exception ex) { EnrollStatus = "FAILED: " + ex.Message; }
+        finally
+        {
+            _recCts?.Cancel();
+            _main.MicMuted = wasMuted;
+            Recording = false;
+        }
+    }
+
     [RelayCommand]
     void PlayRecording()
     {
@@ -329,6 +404,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     void TestVoice()
     {
         if (!_main.IsConnected) { Say("NO CARRIER"); return; }
+        _main.ExpectAudio();
         _main.Server.SendJson(new { type = "test_voice" });
         Say("test line requested");
     }

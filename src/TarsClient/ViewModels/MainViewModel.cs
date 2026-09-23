@@ -1,3 +1,4 @@
+using System.IO;
 using System.Collections.ObjectModel;
 using System.Text;
 using System.Text.Json;
@@ -60,6 +61,11 @@ public sealed partial class MainViewModel : ObservableObject
     string _localState = "";        // hearing / transcribing, from the local VAD
     DateTime _lastPlaybackEnd = DateTime.MinValue;
     string[] _wakeWords = ["tars"];
+    // Stop semantics (server spec section 4): after a stop, audio already in flight for that turn is dropped
+    // until the turn's `done` or the next `user`. Alarms are never dropped.
+    bool _dropTurnAudio;
+    bool _turnActive;
+    string[] _serverFeatures = [];
     volatile float _lastRms;
     int _pttGeneration;
 
@@ -123,7 +129,8 @@ public sealed partial class MainViewModel : ObservableObject
         Game = new GameMode(() => S.Tts.GameMode);
         Voice = new LocalVoice(_ui, () => S, Playback, Game);
         Stt = new SttClient(_ui, () => S.Tts.SidecarUrl,
-            () => Game.Active ? (S.Stt.GameModel, "cpu") : (S.Stt.Model, "cuda"));
+            () => (Game.Active ? S.Stt.GameModel : S.Stt.Model, Game.Active ? "cpu" : "cuda",
+                   S.Stt.VoiceLock && File.Exists(S.Stt.Voiceprint) ? S.Stt.Voiceprint : "", S.Stt.SpeakerThreshold));
         Settings = new SettingsViewModel(this);
 
         _typeTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) };
@@ -172,7 +179,7 @@ public sealed partial class MainViewModel : ObservableObject
             RecomputeStatus();
         };
         Server.Message += OnMessage;
-        Server.Binary += _ => Log.Write("ws: ignored server WAV (voice is local)");
+        Server.Binary += _ => { if (!_dropTurnAudio) Log.Write("ws: ignored server WAV (voice is local)"); };
 
         Playback.PlaybackStarted += () =>
         {
@@ -270,6 +277,8 @@ public sealed partial class MainViewModel : ObservableObject
         switch (type)
         {
             case "hello":
+                _serverFeatures = m.TryGetProperty("features", out var feats) && feats.ValueKind == JsonValueKind.Array
+                    ? feats.EnumerateArray().Select(f => f.GetString() ?? "").ToArray() : [];
                 AssistantName = (Str(m, "name") ?? "TARS").ToUpperInvariant();
                 RecomputeStatus();
                 break;
@@ -288,6 +297,8 @@ public sealed partial class MainViewModel : ObservableObject
                     Add(LineKind.Meta, $"  · ignored: \"{Str(m, "text")}\" ({Str(m, "reason")})");
                 break;
             case "user":
+                _dropTurnAudio = false;
+                _turnActive = true;
                 BeginTurn(Str(m, "text") ?? "");
                 break;
             case "delta":
@@ -300,6 +311,9 @@ public sealed partial class MainViewModel : ObservableObject
                 if (S.ShowDetails) Add(LineKind.Meta, $"  · {Str(m, "name")}: {ToolArg(m)}");
                 break;
             case "done":
+                _dropTurnAudio = false;
+                _turnActive = false;
+                FinishTyping();
                 if (S.ShowDetails) Add(LineKind.Meta, "  · " + DoneLine(m));
                 _serverState = "idle";
                 _replyLine = null;
@@ -309,7 +323,7 @@ public sealed partial class MainViewModel : ObservableObject
                 RingAlarm(Str(m, "text") ?? "Alarm");
                 break;
             case "stop":
-                StopSpeech();
+                StopSpeech(fromServer: true);
                 StopAlarm(false);
                 break;
             case "error":
@@ -322,6 +336,8 @@ public sealed partial class MainViewModel : ObservableObject
                 _serverStt = serverStt;
                 Settings.RefreshStt();
                 break;
+            case "say" when _dropTurnAudio && Str(m, "kind") != "alarm":
+                break;   // a chunk of a turn that was stopped
             case "say":
                 Voice.Say(Str(m, "speak") ?? Str(m, "text") ?? "", Str(m, "kind") ?? "reply");
                 break;
@@ -719,6 +735,8 @@ public sealed partial class MainViewModel : ObservableObject
 
     void RingAlarm(string text)
     {
+        Voice.Stop();
+        Playback.Stop();
         AlarmActive = true;
         FinishTyping();
         ReplyText = "⏰ " + text;
@@ -754,12 +772,23 @@ public sealed partial class MainViewModel : ObservableObject
         RecomputeStatus();
     }
 
-    void StopSpeech()
+    /// <summary>
+    /// Silence now. A user stop (Esc, stop hotkey, PTT, a new message) also tells the server to cancel the running
+    /// turn, if it supports that; either way, chunks of the stopped turn that are still in flight are dropped.
+    /// </summary>
+    void StopSpeech(bool fromServer = false)
     {
+        bool turnInProgress = _turnActive || Playback.IsPlaying || _serverState is "thinking" or "transcribing";
         Voice.Stop();
-        Playback.Stop();
+        Playback.Stop();                       // sends `playback end` if anything was playing
         FinishTyping();
+        if (!turnInProgress) return;
+        _dropTurnAudio = true;
+        if (!fromServer && _serverFeatures.Contains("stop")) Server.SendJson(new { type = "stop" });
     }
+
+    /// <summary>A request that starts audio without a `user` event (test_voice): stop dropping.</summary>
+    public void ExpectAudio() => _dropTurnAudio = false;
 
     // ================================================================== personality (sent live)
 

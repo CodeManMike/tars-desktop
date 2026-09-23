@@ -14,7 +14,7 @@ public sealed class GameMode : IDisposable
     readonly System.Windows.Threading.DispatcherTimer _timer;
     IntPtr _gpu;
     bool _nvml;
-    int _hits;
+    int _hits, _pending;
 
     public bool Active { get; private set; }
     public string Reason { get; private set; } = "";
@@ -39,9 +39,13 @@ public sealed class GameMode : IDisposable
         {
             try
             {
-                if (Win32.SHQueryUserNotificationState(out var st) == 0 &&
-                    st is Win32.QUERY_USER_NOTIFICATION_STATE.QUNS_RUNNING_D3D_FULL_SCREEN or Win32.QUERY_USER_NOTIFICATION_STATE.QUNS_BUSY)
-                    reason = "fullscreen app";
+                // Exclusive D3D fullscreen is a game. "Busy" fullscreen (borderless games, but also a fullscreen video
+                // or a screenshot overlay) only counts while the GPU is actually working hard.
+                if (Win32.SHQueryUserNotificationState(out var st) == 0)
+                {
+                    if (st == Win32.QUERY_USER_NOTIFICATION_STATE.QUNS_RUNNING_D3D_FULL_SCREEN) reason = "fullscreen game";
+                    else if (st == Win32.QUERY_USER_NOTIFICATION_STATE.QUNS_BUSY && GpuBusy()) reason = "fullscreen app, GPU busy";
+                }
             }
             catch { }
             if (_nvml)
@@ -58,15 +62,24 @@ public sealed class GameMode : IDisposable
             }
         }
 
-        // Enter immediately; leave only after 3 quiet polls (15 s) so alt-tabbing doesn't flap.
+        // Enter after 4 consecutive polls (~20 s): a screenshot overlay or a quick fullscreen video isn't a game.
+        // Leave after 3 quiet polls (~15 s) so alt-tabbing out of a game doesn't flap.
         bool want = reason != "";
         _hits = want ? 0 : _hits + 1;
-        bool next = want || (Active && _hits < 3);
+        _pending = want ? _pending + 1 : 0;
+        bool next = Active ? _hits < 3 : _pending >= 4;
         if (want) Reason = reason;
         if (next == Active) return;
         Active = next;
         Log.Write($"game mode: {(Active ? "on (" + Reason + ")" : "off")}");
         Changed?.Invoke();
+    }
+
+    bool GpuBusy()
+    {
+        if (!_nvml) return true;       // can't tell: assume a game
+        try { return Win32.NvmlDeviceGetUtilizationRates(_gpu, out var u) == 0 && u.gpu >= 50; }
+        catch { return true; }
     }
 
     public void Dispose() => _timer.Stop();

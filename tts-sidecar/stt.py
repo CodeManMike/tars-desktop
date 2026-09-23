@@ -4,7 +4,7 @@ The client streams 16 kHz mono Int16 frames over a local WebSocket (/stt/stream)
 utterances; faster-whisper transcribes them (large-v3-turbo on the GPU, or a small CPU model in game mode).
 
 Client -> sidecar (text JSON):
-  {"type":"config","model":"large-v3-turbo","device":"cuda"|"cpu","hotwords":"TARS"}
+  {"type":"config","model":"large-v3-turbo","device":"cuda"|"cpu","speaker":"<voiceprint .npy>"|"","speaker_threshold":0.72}
   {"type":"ptt","state":"start"|"end"}     push-to-talk bracket: everything in between is one utterance
   {"type":"reset"}                         drop any partial utterance (e.g. TARS started speaking)
 Client -> sidecar (binary): PCM16 LE, 16 kHz, mono, any frame size.
@@ -12,7 +12,11 @@ Client -> sidecar (binary): PCM16 LE, 16 kHz, mono, any frame size.
 Sidecar -> client (text JSON):
   {"type":"vad","speech":true|false}
   {"type":"transcribing"}
-  {"type":"utterance","text":...,"source":"vad"|"ptt","speech_ms":..,"stt_ms":..,"logprob":..,"no_speech_prob":..,"model":..}
+  {"type":"utterance","text":...,"source":"vad"|"ptt","speech_ms":..,"stt_ms":..,"logprob":..,"no_speech_prob":..,"model":..,
+   "speaker_sim":..}
+Voice lock: with a voiceprint configured, hands-free (VAD) utterances from anyone else (YouTube, TV, people in the room)
+are dropped before Whisper runs. PTT is never checked: holding the key already says it's you.
+POST /stt/enroll {"wav":path,"out":path} builds the voiceprint from a recording.
   {"type":"rejected","reason":...,"text":...}
 """
 from __future__ import annotations
@@ -34,9 +38,10 @@ PREROLL_CHUNKS = 10             # ~320 ms kept before speech onset
 START_PROB, END_PROB = 0.5, 0.35
 MIN_SPEECH_MS = 250             # Silero-voiced time
 MIN_CLIP_MS = 300               # whole clip
-HANGOVER_MS = 700               # silence that ends an utterance
+HANGOVER_MS = 900               # silence that ends an utterance (natural mid-sentence pauses survive)
 MAX_UTTERANCE_S = 25
-QUIET_RMS = 10 ** (-50 / 20)    # below this a chunk can't be speech: skip the VAD model (idle CPU)
+GATE_FLOOR_MIN = 10 ** (-62 / 20)   # adaptive gate: skip Silero while the level is within ~6 dB of the noise floor
+GATE_OVER_FLOOR = 2.0                # +6 dB
 
 # Whisper's favourite things to say to silence and noise.
 HALLUCINATIONS = re.compile(
@@ -64,6 +69,52 @@ class StreamVad:
         return float(np.asarray(out).reshape(-1)[0])
 
 
+class SpeakerLock:
+    """Speaker verification with Chatterbox's voice encoder (CPU, ~0.1 s per check)."""
+
+    def __init__(self):
+        self.ve = None
+        self.lock = threading.Lock()
+        self.profiles: dict[str, np.ndarray] = {}
+
+    def _encoder(self):
+        if self.ve is None:
+            from huggingface_hub import hf_hub_download
+            from safetensors.torch import load_file
+            from chatterbox.models.voice_encoder import VoiceEncoder
+            ve = VoiceEncoder()
+            ve.load_state_dict(load_file(hf_hub_download("ResembleAI/chatterbox", "ve.safetensors")))
+            ve.eval()
+            self.ve = ve
+        return self.ve
+
+    def embed(self, audio16k: np.ndarray) -> np.ndarray:
+        with self.lock:
+            return self._encoder().embeds_from_wavs([audio16k], RATE, as_spk=True).reshape(-1)
+
+    def enroll(self, wav_path: str, out_path: str) -> dict:
+        import librosa
+        import soundfile as sf
+        a, sr = sf.read(wav_path, dtype="float32")
+        if a.ndim > 1:
+            a = a.mean(axis=1)
+        a = librosa.resample(a, orig_sr=sr, target_sr=RATE)
+        e = self.embed(a)
+        np.save(out_path, e)
+        self.profiles.pop(out_path, None)
+        return {"ok": True, "seconds": round(len(a) / RATE, 1), "out": out_path}
+
+    def similarity(self, profile_path: str, audio16k: np.ndarray) -> float:
+        prof = self.profiles.get(profile_path)
+        if prof is None:
+            prof = np.load(profile_path)
+            self.profiles[profile_path] = prof
+        return float(np.dot(prof, self.embed(audio16k)))
+
+
+SPEAKERS = SpeakerLock()
+
+
 class Transcriber:
     """faster-whisper, loaded lazily, reloaded when the model/device changes. One transcription at a time."""
 
@@ -73,7 +124,8 @@ class Transcriber:
         self.lock = threading.Lock()
         self.model_name = "large-v3-turbo"
         self.device = "cuda"
-        self.hotwords = "TARS"
+        # No "TARS" hint: biasing Whisper towards the name makes it hallucinate the name on coughs and noise.
+        self.hotwords = ""
 
     def configure(self, model: str | None, device: str | None, hotwords: str | None):
         if model:
@@ -137,6 +189,10 @@ class Session:
         self.voiced_chunks = 0
         self.silence_chunks = 0
         self.ptt = False
+        self.floor = GATE_FLOOR_MIN * 4
+        self.skipped: list[np.ndarray] = []
+        self.speaker = ""
+        self.speaker_threshold = 0.72
 
     async def send(self, obj: dict):
         try:
@@ -156,6 +212,10 @@ class Session:
         t = msg.get("type")
         if t == "config":
             self.tx.configure(msg.get("model"), msg.get("device"), msg.get("hotwords"))
+            if "speaker" in msg:
+                self.speaker = msg.get("speaker") or ""
+            if msg.get("speaker_threshold"):
+                self.speaker_threshold = float(msg["speaker_threshold"])
             # Load (or swap) now, off the event loop, so the first utterance isn't slow.
             asyncio.get_running_loop().run_in_executor(None, self._warm)
         elif t == "ptt":
@@ -182,13 +242,23 @@ class Session:
         self.pending = np.concatenate([self.pending, samples])
         while len(self.pending) >= CHUNK:
             chunk, self.pending = self.pending[:CHUNK], self.pending[CHUNK:]
-            # A quiet room is most of the day: don't run Silero on silence (unless mid-utterance, where
-            # the model's state matters for the end-of-speech decision).
-            if not self.ptt and not self.in_speech and float(np.sqrt(np.mean(chunk * chunk))) < QUIET_RMS:
-                self.preroll.append(chunk)
-                if len(self.preroll) > PREROLL_CHUNKS:
-                    self.preroll.pop(0)
-                continue
+            # Adaptive gate: while the level sits near the room's noise floor, skip Silero (idle CPU). When it rises,
+            # first run the skipped pre-roll through Silero so its state is warm and soft onsets ("h" of "hey") count.
+            rms = float(np.sqrt(np.mean(chunk * chunk)))
+            if not self.ptt and not self.in_speech:
+                gate = max(GATE_FLOOR_MIN, self.floor * GATE_OVER_FLOOR)
+                if rms < gate:
+                    self.floor = 0.98 * self.floor + 0.02 * rms       # ~1.5 s time constant
+                    self.preroll.append(chunk)
+                    if len(self.preroll) > PREROLL_CHUNKS:
+                        self.preroll.pop(0)
+                    self.skipped.append(chunk)
+                    if len(self.skipped) > PREROLL_CHUNKS:
+                        self.skipped.pop(0)
+                    continue
+                for c in self.skipped:          # warm Silero on what the gate skipped
+                    self.vad.prob(c)
+                self.skipped.clear()
             p = self.vad.prob(chunk)
             if self.ptt:
                 self.speech.append(chunk)
@@ -228,6 +298,16 @@ class Session:
         if voiced_ms < MIN_SPEECH_MS or len(audio) * 1000 / RATE < MIN_CLIP_MS:
             await self.send({"type": "rejected", "reason": f"no speech ({voiced_ms} ms voiced)", "text": ""})
             return
+        sim = None
+        if source == "vad" and self.speaker:
+            try:
+                sim = await asyncio.get_running_loop().run_in_executor(None, SPEAKERS.similarity, self.speaker, audio)
+            except Exception as e:
+                log.warning("voice lock: %s (letting the utterance through)", e)
+            if sim is not None and sim < self.speaker_threshold:
+                log.info("stt: rejected, not your voice (%.2f), %d ms", sim, voiced_ms)
+                await self.send({"type": "rejected", "reason": f"not your voice ({sim:.2f})", "text": "", "speaker_sim": round(sim, 3)})
+                return
         await self.send({"type": "transcribing"})
         try:
             r = await asyncio.get_running_loop().run_in_executor(None, self.tx.transcribe, audio)
@@ -237,9 +317,13 @@ class Session:
             return
         text = r["text"]
         if not text or HALLUCINATIONS.match(text.strip()):
+            log.info("stt: rejected as noise: %r", text)
             await self.send({"type": "rejected", "reason": "noise", "text": text, **r})
             return
-        await self.send({"type": "utterance", "text": text, "source": source, "speech_ms": voiced_ms, **r})
+        log.info("stt: %s %d ms (%s ms stt, lp %.2f%s): %r", source, voiced_ms, r["stt_ms"], r["logprob"],
+                 "" if sim is None else f", voice {sim:.2f}", text)
+        await self.send({"type": "utterance", "text": text, "source": source, "speech_ms": voiced_ms,
+                         "speaker_sim": None if sim is None else round(sim, 3), **r})
 
 
 def mount(app, transcriber: Transcriber):
@@ -262,6 +346,11 @@ def mount(app, transcriber: Transcriber):
                         pass
         except WebSocketDisconnect:
             pass
+
+    @app.post("/stt/enroll")
+    async def stt_enroll(body: dict):
+        """Build a voiceprint from a recording: {"wav": path, "out": path.npy}."""
+        return await asyncio.to_thread(SPEAKERS.enroll, body["wav"], body["out"])
 
     @app.post("/stt/unload")
     async def stt_unload():

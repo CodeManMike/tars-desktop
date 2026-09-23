@@ -19,11 +19,11 @@ public sealed class SttClient : IDisposable
 {
     readonly Dispatcher _ui;
     readonly Func<string> _sidecarUrl;
-    readonly Func<(string model, string device)> _modelChoice;
+    readonly Func<(string model, string device, string speaker, double threshold)> _modelChoice;
     Channel<(bool binary, byte[] data)> _out = NewChannel();
     readonly CancellationTokenSource _life = new();
     Task? _loop;
-    (string model, string device) _sentConfig;
+    (string model, string device, string speaker, double threshold) _sentConfig;
 
     public bool IsReady { get; private set; }
     public event Action<bool>? ReadyChanged;
@@ -32,7 +32,7 @@ public sealed class SttClient : IDisposable
     public event Action<Utterance>? UtteranceReady;
     public event Action<string, string>? Rejected;     // reason, text
 
-    public SttClient(Dispatcher ui, Func<string> sidecarUrl, Func<(string model, string device)> modelChoice)
+    public SttClient(Dispatcher ui, Func<string> sidecarUrl, Func<(string model, string device, string speaker, double threshold)> modelChoice)
     {
         _ui = ui;
         _sidecarUrl = sidecarUrl;
@@ -56,7 +56,8 @@ public sealed class SttClient : IDisposable
         var c = _modelChoice();
         if (c == _sentConfig) return;
         _sentConfig = c;
-        Control(new { type = "config", model = c.model, device = c.device, hotwords = "TARS" });
+        // No "TARS" hotword: it made Whisper hear the name in coughs and throat-clearing.
+        Control(new { type = "config", model = c.model, device = c.device, hotwords = "", speaker = c.speaker, speaker_threshold = c.threshold });
     }
 
     void Control(object o) { if (IsReady) _out.Writer.TryWrite((false, JsonSerializer.SerializeToUtf8Bytes(o))); }

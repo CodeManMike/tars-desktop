@@ -143,6 +143,12 @@ internal static partial class Win32
     [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetHandleByIndex_v2")]
     public static extern int NvmlDeviceGetHandleByIndex(uint index, out IntPtr device);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NvmlUtilization { public uint gpu, memory; }
+
+    [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetUtilizationRates")]
+    public static extern int NvmlDeviceGetUtilizationRates(IntPtr device, out NvmlUtilization util);
+
     [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetMemoryInfo")]
     public static extern int NvmlDeviceGetMemoryInfo(IntPtr device, out NvmlMemory memory);
 
