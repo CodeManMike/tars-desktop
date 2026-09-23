@@ -20,7 +20,11 @@ public static class Installer
     public static string AppExe => Path.Combine(InstallDir, "TARS.exe");
     public static string VenvDir { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "TARS", "tts-venv");
     public static string DataDir { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TARS");
-    static string StartMenuLink => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "TARS.lnk");
+    static string StartMenuDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "TARS");
+    static string StartMenuLink => Path.Combine(StartMenuDir, "TARS.lnk");
+    static string StartMenuUninstallLink => Path.Combine(StartMenuDir, "Uninstall TARS.lnk");
+    static string LegacyStartMenuLink => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "TARS.lnk");
+    public static string UninstallerExe => Path.Combine(InstallDir, "TARS-Uninstall.exe");
     static string DesktopLink => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "TARS.lnk");
 
     public static bool VoiceInstalled => File.Exists(Path.Combine(VenvDir, "Scripts", "python.exe"));
@@ -59,13 +63,16 @@ public static class Installer
             }
         }
 
-        // Keep a copy of this setup next to the app: it's the uninstaller.
+        // A copy of this setup next to the app is the uninstaller: named TARS-Uninstall.exe it opens in uninstall mode.
         var self = Environment.ProcessPath!;
-        var uninstaller = Path.Combine(InstallDir, "TARS-Setup.exe");
+        var uninstaller = UninstallerExe;
         if (!string.Equals(self, uninstaller, StringComparison.OrdinalIgnoreCase)) File.Copy(self, uninstaller, true);
 
         log("SHORTCUTS");
+        if (File.Exists(LegacyStartMenuLink)) File.Delete(LegacyStartMenuLink);
+        Directory.CreateDirectory(StartMenuDir);
         CreateShortcut(StartMenuLink, AppExe, "TARS desktop client");
+        CreateShortcut(StartMenuUninstallLink, uninstaller, "Remove TARS Desktop");
         if (o.DesktopShortcut) CreateShortcut(DesktopLink, AppExe, "TARS desktop client");
         else if (File.Exists(DesktopLink)) File.Delete(DesktopLink);
 
@@ -78,6 +85,7 @@ public static class Installer
             k.SetValue("DisplayIcon", AppExe);
             k.SetValue("InstallLocation", InstallDir);
             k.SetValue("UninstallString", $"\"{uninstaller}\" --uninstall");
+            k.SetValue("QuietUninstallString", $"\"{uninstaller}\" --uninstall --quiet");
             k.SetValue("NoModify", 1, RegistryValueKind.DWord);
             k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
             k.SetValue("EstimatedSize", (int)(DirSize(InstallDir) / 1024), RegistryValueKind.DWord);
@@ -107,8 +115,9 @@ public static class Installer
         StopRunning();
         await Task.Delay(300);
 
-        foreach (var link in new[] { StartMenuLink, DesktopLink })
+        foreach (var link in new[] { StartMenuLink, StartMenuUninstallLink, LegacyStartMenuLink, DesktopLink })
             try { if (File.Exists(link)) File.Delete(link); } catch { }
+        try { if (Directory.Exists(StartMenuDir) && !Directory.EnumerateFileSystemEntries(StartMenuDir).Any()) Directory.Delete(StartMenuDir); } catch { }
         using (var run = Registry.CurrentUser.OpenSubKey(RunKey, true)) run?.DeleteValue("TARS", false);
         Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, false);
         log("SHORTCUTS AND REGISTRY ENTRIES REMOVED");
@@ -121,15 +130,46 @@ public static class Installer
         }
         else log($"KEPT SETTINGS ({DataDir}) AND VOICE ENGINE ({VenvDir})");
 
-        // This exe lives in the folder being removed: finish the job from a detached cmd after we exit.
-        var cmd = $"/c timeout /t 2 /nobreak >nul & rmdir /s /q \"{InstallDir}\"";
-        Process.Start(new ProcessStartInfo("cmd.exe", cmd) { CreateNoWindow = true, UseShellExecute = false, WorkingDirectory = Path.GetTempPath() });
-        log("PROGRAM FILES WILL BE REMOVED WHEN THIS WINDOW CLOSES. GOODBYE.");
+        // We run from a %TEMP% copy (see RelaunchFromTempIfInside), so the install folder can go right now.
+        for (int attempt = 1; Directory.Exists(InstallDir); attempt++)
+        {
+            try { Directory.Delete(InstallDir, true); log($"REMOVED {InstallDir}"); }
+            catch (Exception ex) when (attempt < 5) { log($"  retrying ({ex.Message})"); await Task.Delay(1000); StopRunning(); }
+            catch (Exception ex) { log($"  ! {InstallDir}: {ex.Message}"); break; }
+        }
+
+        // Tidy up this temporary copy after it exits.
+        if (IsTempCopy)
+        {
+            var self = Environment.ProcessPath!;
+            Process.Start(new ProcessStartInfo("cmd.exe", $"/c timeout /t 3 /nobreak >nul & del /q \"{self}\"")
+                { CreateNoWindow = true, UseShellExecute = false, WorkingDirectory = Path.GetTempPath() });
+        }
+        log("TARS DESKTOP IS UNINSTALLED. GOODBYE.");
+    }
+
+    static bool IsTempCopy => (Environment.ProcessPath ?? "").StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A running exe can't delete its own folder: when the uninstaller starts from inside the install folder,
+    /// it copies itself to %TEMP% and relaunches from there. Returns true if the caller should exit.
+    /// </summary>
+    public static bool RelaunchFromTempIfInside(string[] args)
+    {
+        var self = Environment.ProcessPath;
+        if (self == null || !self.StartsWith(InstallDir, StringComparison.OrdinalIgnoreCase)) return false;
+        var temp = Path.Combine(Path.GetTempPath(), $"TARS-Uninstall-{Guid.NewGuid():N}.exe");
+        File.Copy(self, temp, true);
+        var psi = new ProcessStartInfo(temp) { UseShellExecute = false, WorkingDirectory = Path.GetTempPath() };
+        psi.ArgumentList.Add("--uninstall");
+        foreach (var a in args) if (!a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)) psi.ArgumentList.Add(a);
+        Process.Start(psi);
+        return true;
     }
 
     static void StopRunning()
     {
-        foreach (var p in Process.GetProcessesByName("TARS"))
+        foreach (var p in Process.GetProcessesByName("TARS").Concat(SidecarProcesses()))
         {
             try
             {
@@ -137,6 +177,17 @@ public static class Installer
                 p.WaitForExit(3000);
             }
             catch { }
+        }
+    }
+
+    /// <summary>The voice sidecar: python.exe from our venv (normally it exits with TARS; belt and braces).</summary>
+    static IEnumerable<Process> SidecarProcesses()
+    {
+        foreach (var p in Process.GetProcessesByName("python"))
+        {
+            string? path = null;
+            try { path = p.MainModule?.FileName; } catch { }
+            if (path != null && path.StartsWith(VenvDir, StringComparison.OrdinalIgnoreCase)) yield return p;
         }
     }
 

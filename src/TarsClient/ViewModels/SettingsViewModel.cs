@@ -466,6 +466,18 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     [RelayCommand]
+    async Task Uninstall()
+    {
+        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "TARS");
+        var exe = new[] { Path.Combine(dir, "TARS-Uninstall.exe"), Path.Combine(dir, "TARS-Setup.exe") }.FirstOrDefault(File.Exists);
+        if (exe == null) { Say("no installed copy found (this looks like a dev build)"); return; }
+        if (!await ConfirmAsync("Uninstall TARS Desktop? TARS will close and the uninstaller will open.")) return;
+        _main.Store.SaveNow();
+        Process.Start(new ProcessStartInfo(exe, "--uninstall") { UseShellExecute = false, WorkingDirectory = Path.GetTempPath() });
+        System.Windows.Application.Current.Shutdown();
+    }
+
+    [RelayCommand]
     void RestartApp()
     {
         _main.Store.SaveNow();

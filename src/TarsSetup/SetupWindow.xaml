@@ -39,7 +39,7 @@
                 <!-- options (install) -->
                 <StackPanel Grid.Row="2" x:Name="OptionsPanel" Margin="0,10,0,0">
                     <TextBlock><Run Text="TARGET        " /><Run x:Name="TargetRun" Foreground="{StaticResource FgBright}" /></TextBlock>
-                    <CheckBox x:Name="StartupBox" Content="START WITH WINDOWS (minimized to the tray)" IsChecked="True" Margin="0,8,0,0" />
+                    <CheckBox x:Name="StartupBox" Content="START WITH WINDOWS (minimized-to-tray is under SET → SYSTEM)" IsChecked="True" Margin="0,8,0,0" />
                     <CheckBox x:Name="DesktopBox" Content="DESKTOP SHORTCUT" IsChecked="False" />
                     <CheckBox x:Name="VoiceBox" Content="INSTALL THE LOCAL VOICE ENGINE (GPU, ≈4.5 GB download)" IsChecked="True" />
                     <CheckBox x:Name="LaunchBox" Content="LAUNCH TARS WHEN DONE" IsChecked="True" />

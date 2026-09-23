@@ -27,4 +27,7 @@ if ($LASTEXITCODE) { throw 'setup publish failed' }
 $version = ([xml](Get-Content (Join-Path $root 'src\TarsClient\TarsClient.csproj'))).Project.PropertyGroup.Version | Select-Object -First 1
 $out = Join-Path $art "TARS-Setup-$version.exe"
 Move-Item (Join-Path $art 'setup\TARS-Setup.exe') $out -Force
+# The same program named TARS-Uninstall.exe opens straight into uninstall mode.
+Copy-Item $out (Join-Path $art 'TARS-Uninstall.exe') -Force
 Write-Host ("== {0} ({1:N0} MB)" -f $out, ((Get-Item $out).Length / 1MB))
+Write-Host ("== {0}" -f (Join-Path $art 'TARS-Uninstall.exe'))

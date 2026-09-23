@@ -8,15 +8,19 @@ namespace TarsSetup;
 public partial class SetupWindow : Window
 {
     readonly bool _uninstall;
+    bool _quiet;
     bool _busy, _done;
     readonly DispatcherTimer _spinner = new() { Interval = TimeSpan.FromMilliseconds(120) };
     int _spin;
 
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
-    public SetupWindow(bool uninstall)
+    public SetupWindow(bool uninstall, bool quiet = false)
     {
         _uninstall = uninstall;
+        // --quiet: run straight away with the defaults, close when done (Apps & Features "quiet uninstall").
+        _quiet = quiet;
+        if (quiet) Loaded += (_, _) => { Go_Click(this, new RoutedEventArgs()); };
         InitializeComponent();
         VersionRun.Text = $"  v{Installer.Version}";
         TargetRun.Text = Installer.InstallDir;
@@ -83,6 +87,7 @@ public partial class SetupWindow : Window
         }
         _busy = false;
         _done = true;
+        if (_quiet) { await Task.Delay(1500); Close(); return; }
         GoButton.Content = "CLOSE";
         GoButton.IsEnabled = true;
     }

@@ -379,7 +379,9 @@
                                 <WrapPanel>
                                     <Button Content="CLEAR SCROLLBACK" Command="{Binding DataContext.ClearScrollbackCommand, RelativeSource={RelativeSource AncestorType=Window}}" Margin="0,0,6,0"
                                             ToolTip="Empty the terminal history" />
-                                    <Button Content="RESTART TARS" Command="{Binding RestartAppCommand}" ToolTip="Restart the client (applies transparency)" />
+                                    <Button Content="RESTART TARS" Command="{Binding RestartAppCommand}" ToolTip="Restart the client (applies transparency)" Margin="0,0,6,0" />
+                                    <Button Content="UNINSTALL TARS" Command="{Binding UninstallCommand}"
+                                            ToolTip="Remove TARS Desktop from this PC (asks first; you choose whether to keep settings and the voice engine)" />
                                 </WrapPanel>
                                 <TextBlock Style="{StaticResource Head}" Text="DISPLAY" />
                                 <CheckBox Content="SCANLINES" IsChecked="{Binding Scanlines}" />
