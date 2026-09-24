@@ -4,14 +4,10 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>TARS-Setup</AssemblyName>
     <RootNamespace>TarsSetup</RootNamespace>
     <ApplicationIcon>..\TarsClient\Assets\tars.ico</ApplicationIcon>
-    <Version>1.0.0</Version>
     <Product>TARS Desktop Setup</Product>
-    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <!-- build/build-installer.ps1 passes the published client as a zip -->
     <PayloadZip Condition="'$(PayloadZip)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\payload.zip</PayloadZip>
   </PropertyGroup>

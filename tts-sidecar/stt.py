@@ -4,7 +4,8 @@ The client streams 16 kHz mono Int16 frames over a local WebSocket (/stt/stream)
 utterances; faster-whisper transcribes them (large-v3-turbo on the GPU, or a small CPU model in game mode).
 
 Client -> sidecar (text JSON):
-  {"type":"config","model":"large-v3-turbo","device":"cuda"|"cpu","speaker":"<voiceprint .npy>"|"","speaker_threshold":0.72}
+  {"type":"config","model":"large-v3-turbo","device":"cuda"|"cpu","hotwords":"TARS",
+   "speaker":"<voiceprint .npy>"|"","speaker_threshold":0.67}
   {"type":"ptt","state":"start"|"end"}     push-to-talk bracket: everything in between is one utterance
   {"type":"reset"}                         drop any partial utterance (e.g. TARS started speaking)
 Client -> sidecar (binary): PCM16 LE, 16 kHz, mono, any frame size.
@@ -12,16 +13,20 @@ Client -> sidecar (binary): PCM16 LE, 16 kHz, mono, any frame size.
 Sidecar -> client (text JSON):
   {"type":"vad","speech":true|false}
   {"type":"transcribing"}
-  {"type":"utterance","text":...,"source":"vad"|"ptt","speech_ms":..,"stt_ms":..,"logprob":..,"no_speech_prob":..,"model":..,
-   "speaker_sim":..}
-Voice lock: with a voiceprint configured, hands-free (VAD) utterances from anyone else (YouTube, TV, people in the room)
-are dropped before Whisper runs. PTT is never checked: holding the key already says it's you.
-POST /stt/enroll {"wav":path,"out":path} builds the voiceprint from a recording.
-  {"type":"rejected","reason":...,"text":...}
+  {"type":"utterance","text":..,"source":"vad"|"ptt","speech_ms":..,"duration_ms":..,"stt_ms":..,"logprob":..,
+   "no_speech_prob":..,"model":..,"speaker_sim":..}
+  {"type":"rejected","reason":..,"text":..}
+
+Voice lock: with a voiceprint configured, hands-free (VAD) utterances of 2 s or more from anyone else (YouTube, TV,
+people in the room) are dropped before Whisper runs. PTT is never checked: holding the key already says it's you, so
+PTT speech refines the voiceprint instead. POST /stt/enroll {"wav":path,"out":path} builds the voiceprint.
+
+Privacy: transcripts are logged at DEBUG only; INFO lines carry timings and scores, never what was said.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import threading
@@ -67,6 +72,7 @@ class StreamVad:
         self.ctx = np.zeros(64, dtype=np.float32)
 
     def prob(self, chunk: np.ndarray) -> float:
+        """Speech probability for one 512-sample chunk."""
         x = np.concatenate([self.ctx, chunk])[None, :].astype(np.float32)
         out, self.h, self.c = self.session.run(None, {"input": x, "h": self.h, "c": self.c})
         self.ctx = chunk[-64:]
@@ -93,10 +99,12 @@ class SpeakerLock:
         return self.ve
 
     def embed(self, audio16k: np.ndarray) -> np.ndarray:
+        """A unit-length speaker embedding for 16 kHz audio."""
         with self.lock:
             return self._encoder().embeds_from_wavs([audio16k], RATE, as_spk=True).reshape(-1)
 
     def enroll(self, wav_path: str, out_path: str) -> dict:
+        """Build a voiceprint from the voiced chunks of a recording; ValueError with under 8 s of speech."""
         import librosa
         import soundfile as sf
         a, sr = sf.read(wav_path, dtype="float32")
@@ -126,6 +134,7 @@ class SpeakerLock:
         self.profiles[profile_path] = new
 
     def similarity(self, profile_path: str, audio16k: np.ndarray) -> float:
+        """Cosine similarity between the voiceprint and this clip."""
         prof = self.profiles.get(profile_path)
         if prof is None:
             prof = np.load(profile_path)
@@ -180,6 +189,7 @@ class Transcriber:
         return f"{self.key[0]}@{self.key[1]}" if self.key else None
 
     def transcribe(self, audio: np.ndarray) -> dict:
+        """Transcribe one utterance, dropping low-confidence segments; returns the text and the scores we gate on."""
         with self.lock:
             self._ensure()
             t0 = time.time()
@@ -214,15 +224,17 @@ class Session:
         self.floor = GATE_FLOOR_MIN * 4
         self.skipped: list[np.ndarray] = []
         self.speaker = ""
-        self.speaker_threshold = 0.72
+        self.speaker_threshold = 0.67
 
     async def send(self, obj: dict):
+        """Send to the client. If it has gone, the receive loop ends the session, so we drop the message."""
         try:
             await self.ws.send_json(obj)
-        except Exception:
+        except (RuntimeError, WebSocketDisconnect):
             pass
 
     def reset(self):
+        """Forget any partial utterance and the VAD state."""
         self.vad.reset()
         self.pending = np.zeros(0, dtype=np.float32)
         self.preroll.clear()
@@ -231,6 +243,7 @@ class Session:
         self.voiced_chunks = self.silence_chunks = 0
 
     async def on_control(self, msg: dict):
+        """Handle a config, ptt or reset message."""
         t = msg.get("type")
         if t == "config":
             self.tx.configure(msg.get("model"), msg.get("device"), msg.get("hotwords"))
@@ -253,6 +266,7 @@ class Session:
                 self.reset()
 
     def _warm(self):
+        """Load (or swap) the Whisper model ahead of the first utterance."""
         try:
             with self.tx.lock:
                 self.tx._ensure()
@@ -260,6 +274,7 @@ class Session:
             log.exception("stt: load failed")
 
     async def on_audio(self, data: bytes):
+        """Feed PCM through the gate and VAD; an utterance ends after HANGOVER_MS of silence or MAX_UTTERANCE_S."""
         samples = np.frombuffer(data, dtype="<i2").astype(np.float32) / 32768.0
         self.pending = np.concatenate([self.pending, samples])
         while len(self.pending) >= CHUNK:
@@ -311,6 +326,7 @@ class Session:
                 await self.finish("vad")
 
     async def finish(self, source: str):
+        """Check, transcribe and filter one utterance, then send it (or why we dropped it) to the client."""
         audio = np.concatenate(self.speech) if self.speech else np.zeros(0, dtype=np.float32)
         voiced_ms = round(self.voiced_chunks * CHUNK * 1000 / RATE)
         self.speech = []
@@ -342,23 +358,29 @@ class Session:
             return
         text = r["text"]
         if NAME_ONLY.match(text) and (voiced_ms < 300 or r["logprob"] <= -0.6 or r["no_speech_prob"] >= 0.4):
-            log.info("stt: rejected unclear name-only %r (%d ms, lp %.2f)", text, voiced_ms, r["logprob"])
+            log.info("stt: rejected unclear name-only (%d ms, lp %.2f)", voiced_ms, r["logprob"])
+            log.debug("stt: name-only text %r", text)
             await self.send({"type": "rejected", "reason": "name only, too unclear", "text": text, **r})
             return
         if not text or HALLUCINATIONS.match(text.strip()):
-            log.info("stt: rejected as noise: %r", text)
+            log.info("stt: rejected as noise (%d ms, lp %.2f)", voiced_ms, r["logprob"])
+            log.debug("stt: noise text %r", text)
             await self.send({"type": "rejected", "reason": "noise", "text": text, **r})
             return
-        log.info("stt: %s %d ms (%s ms stt, lp %.2f%s): %r", source, voiced_ms, r["stt_ms"], r["logprob"],
-                 "" if sim is None else f", voice {sim:.2f}", text)
+        log.info("stt: %s %d ms (%s ms stt, lp %.2f%s)", source, voiced_ms, r["stt_ms"], r["logprob"],
+                 "" if sim is None else f", voice {sim:.2f}")
+        log.debug("stt: text %r", text)
         await self.send({"type": "utterance", "text": text, "source": source, "speech_ms": voiced_ms,
                          "duration_ms": duration_ms,
                          "speaker_sim": None if sim is None else round(sim, 3), **r})
 
 
 def mount(app, transcriber: Transcriber):
+    """Add the STT routes to the sidecar's FastAPI app."""
+
     @app.websocket("/stt/stream")
     async def stt_stream(ws: WebSocket):
+        """One client stream: binary frames are audio, text frames are control messages."""
         await ws.accept()
         s = Session(ws, transcriber)
         try:
@@ -369,7 +391,6 @@ def mount(app, transcriber: Transcriber):
                 if m.get("bytes") is not None:
                     await s.on_audio(m["bytes"])
                 elif m.get("text") is not None:
-                    import json
                     try:
                         await s.on_control(json.loads(m["text"]))
                     except ValueError:
@@ -388,5 +409,6 @@ def mount(app, transcriber: Transcriber):
 
     @app.post("/stt/unload")
     async def stt_unload():
+        """Free the Whisper model."""
         await asyncio.to_thread(transcriber.unload)
         return {"ok": True}

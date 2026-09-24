@@ -1,100 +1,148 @@
-using System.IO;
 using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
 using System.Threading.Channels;
-using System.Windows.Threading;
 
 namespace TarsClient.Services;
 
-/// <summary>A finished, transcribed utterance from the local STT.</summary>
-public sealed record Utterance(string Text, string Source, int SpeechMs, int DurationMs, int SttMs, double LogProb, double NoSpeechProb, string Model);
-
 /// <summary>
-/// Local speech-to-text: streams mic frames to the sidecar's /stt/stream (Silero VAD + faster-whisper)
-/// and raises utterances. Connects whenever the sidecar is up; <see cref="IsReady"/> says whether frames should go here
-/// (true) or to the server as before (false). Events arrive on the UI thread.
+/// Local speech-to-text: we stream mic frames to the sidecar's <c>/stt/stream</c> (Silero VAD + faster-whisper) and
+/// raise utterances. We connect whenever the sidecar is up; <see cref="IsReady"/> says whether frames should come here
+/// (true) or go to the server as before (false). Events arrive on the UI thread.
 /// </summary>
 public sealed class SttClient : IDisposable
 {
-    readonly Dispatcher _ui;
-    readonly Func<string> _sidecarUrl;
-    readonly Func<(string model, string device, string speaker, double threshold)> _modelChoice;
-    Channel<(bool binary, byte[] data)> _out = NewChannel();
-    readonly CancellationTokenSource _life = new();
-    Task? _loop;
-    (string model, string device, string speaker, double threshold) _sentConfig;
+    #region Fields
 
-    public bool IsReady { get; private set; }
-    public event Action<bool>? ReadyChanged;
-    public event Action<bool>? SpeechChanged;          // VAD: someone started / stopped talking
-    public event Action? Transcribing;
-    public event Action<Utterance>? UtteranceReady;
-    public event Action<string, string>? Rejected;     // reason, text
+    private readonly Dispatcher _ui;
+    private readonly Func<string> _sidecarUrl;
+    private readonly Func<(string model, string device, string speaker, double threshold)> _config;
+    private readonly CancellationTokenSource _life = new();
+    private Channel<(bool binary, byte[] data)> _out = NewChannel();
+    private (string model, string device, string speaker, double threshold) _sentConfig;
+    private Task? _loop;
 
-    public SttClient(Dispatcher ui, Func<string> sidecarUrl, Func<(string model, string device, string speaker, double threshold)> modelChoice)
+    #endregion
+
+    #region Constructor
+
+    /// <summary>Creates the client; <paramref name="config"/> is re-read on every <see cref="Reconfigure"/>.</summary>
+    public SttClient(Dispatcher ui, Func<string> sidecarUrl, Func<(string model, string device, string speaker, double threshold)> config)
     {
         _ui = ui;
         _sidecarUrl = sidecarUrl;
-        _modelChoice = modelChoice;
+        _config = config;
     }
 
-    static Channel<(bool, byte[])> NewChannel() =>
-        Channel.CreateBounded<(bool, byte[])>(new BoundedChannelOptions(512) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+    #endregion
 
+    #region Properties
+
+    /// <summary>Whether the sidecar's STT stream is connected.</summary>
+    public bool IsReady { get; private set; }
+
+    #endregion
+
+    #region Events
+
+    /// <summary><see cref="IsReady"/> changed.</summary>
+    public event Action<bool>? ReadyChanged;
+
+    /// <summary>The VAD heard someone start (true) or stop (false) talking.</summary>
+    public event Action<bool>? SpeechChanged;
+
+    /// <summary>Whisper is working on an utterance.</summary>
+    public event Action? Transcribing;
+
+    /// <summary>A finished transcript.</summary>
+    public event Action<Utterance>? UtteranceReady;
+
+    /// <summary>The sidecar dropped an utterance: reason and (possibly empty) text.</summary>
+    public event Action<string, string>? Rejected;
+
+    #endregion
+
+    #region Public Methods
+
+    /// <summary>Starts the connect loop (idempotent).</summary>
     public void Start() => _loop ??= Task.Run(() => RunAsync(_life.Token));
 
-    public void SendAudio(byte[] pcm) { if (IsReady) _out.Writer.TryWrite((true, pcm)); }
-    public void PttStart() => Control(new { type = "ptt", state = "start" });
-    public void PttEnd() => Control(new { type = "ptt", state = "end" });
-    /// <summary>Drop any half-heard utterance (TARS started talking).</summary>
-    public void Reset() => Control(new { type = "reset" });
-
-    /// <summary>Re-send the model/device choice (game mode on/off, settings changed).</summary>
-    public void Reconfigure()
+    /// <summary>Queues a 16 kHz PCM frame.</summary>
+    public void SendAudio(byte[] pcm)
     {
-        var c = _modelChoice();
-        if (c == _sentConfig) return;
-        _sentConfig = c;
-        // "TARS" hotword: a short "TARS" is misheard ("Charles") without it; unclear name-only clips are rejected downstream.
-        Control(new { type = "config", model = c.model, device = c.device, hotwords = "TARS", speaker = c.speaker, speaker_threshold = c.threshold });
+        if (IsReady) _out.Writer.TryWrite((true, pcm));
     }
 
-    void Control(object o) { if (IsReady) _out.Writer.TryWrite((false, JsonSerializer.SerializeToUtf8Bytes(o))); }
+    /// <summary>Opens a push-to-talk bracket.</summary>
+    public void PttStart() => Control(SidecarMessages.Ptt(true));
 
-    async Task RunAsync(CancellationToken ct)
+    /// <summary>Closes the push-to-talk bracket; the sidecar transcribes it as one utterance.</summary>
+    public void PttEnd() => Control(SidecarMessages.Ptt(false));
+
+    /// <summary>Drops any half-heard utterance (TARS started talking).</summary>
+    public void Reset() => Control(SidecarMessages.Reset());
+
+    /// <summary>Re-sends model, device and voice lock when they changed (game mode, settings).</summary>
+    public void Reconfigure()
+    {
+        var c = _config();
+        if (c == _sentConfig) return;
+        _sentConfig = c;
+        Control(SidecarMessages.Config(c.model, c.device, c.speaker, c.threshold));
+    }
+
+    /// <inheritdoc />
+    public void Dispose() => _life.Cancel();
+
+    #endregion
+
+    #region Private Methods
+
+    private static Channel<(bool, byte[])> NewChannel() =>
+        Channel.CreateBounded<(bool, byte[])>(new BoundedChannelOptions(512) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+
+    private void Control(object message)
+    {
+        if (IsReady) _out.Writer.TryWrite((false, JsonSerializer.SerializeToUtf8Bytes(message)));
+    }
+
+    private async Task RunAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            try
-            {
-                var baseUrl = _sidecarUrl().TrimEnd('/');
-                var uri = new Uri(baseUrl.Replace("http://", "ws://").Replace("https://", "wss://") + "/stt/stream");
-                using var ws = new ClientWebSocket();
-                using (var cts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-                {
-                    cts.CancelAfter(3000);
-                    await ws.ConnectAsync(uri, cts.Token);
-                }
-                _out = NewChannel();
-                SetReady(true);
-                _sentConfig = default;
-                _ = _ui.BeginInvoke(Reconfigure);
-
-                using var session = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                var send = SendLoop(ws, session.Token);
-                await ReceiveLoop(ws, session.Token);
-                session.Cancel();
-                try { await send; } catch { }
-            }
+            try { await SessionAsync(ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
-            catch { /* sidecar not up yet / restarting */ }
+            catch (Exception) when (!ct.IsCancellationRequested) { /* sidecar not up yet, or restarting: the loop must survive */ }
+
             SetReady(false);
-            try { await Task.Delay(3000, ct); } catch { break; }
+            try { await Task.Delay(3000, ct); }
+            catch (OperationCanceledException) { break; }
         }
     }
 
-    void SetReady(bool ready)
+    private async Task SessionAsync(CancellationToken ct)
+    {
+        var baseUrl = _sidecarUrl().TrimEnd('/');
+        var uri = new Uri(baseUrl.Replace("http://", "ws://").Replace("https://", "wss://") + "/stt/stream");
+        using var ws = new ClientWebSocket();
+        using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            connectCts.CancelAfter(3000);
+            await ws.ConnectAsync(uri, connectCts.Token);
+        }
+
+        _out = NewChannel();
+        SetReady(true);
+        _sentConfig = default;
+        _ = _ui.BeginInvoke(Reconfigure);
+
+        using var session = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var send = SendLoopAsync(ws, session.Token);
+        await ReceiveLoopAsync(ws, session.Token);
+        session.Cancel();
+        try { await send; }
+        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException) { }
+    }
+
+    private void SetReady(bool ready)
     {
         if (IsReady == ready) return;
         IsReady = ready;
@@ -102,17 +150,22 @@ public sealed class SttClient : IDisposable
         _ = _ui.BeginInvoke(() => ReadyChanged?.Invoke(ready));
     }
 
-    async Task SendLoop(ClientWebSocket ws, CancellationToken ct)
+    private async Task SendLoopAsync(ClientWebSocket ws, CancellationToken ct)
     {
         var reader = _out.Reader;
         while (await reader.WaitToReadAsync(ct))
+        {
             while (reader.TryRead(out var item))
-                await ws.SendAsync(item.data, item.binary ? WebSocketMessageType.Binary : WebSocketMessageType.Text, true, ct);
+            {
+                var type = item.binary ? WebSocketMessageType.Binary : WebSocketMessageType.Text;
+                await ws.SendAsync(item.data, type, true, ct);
+            }
+        }
     }
 
-    async Task ReceiveLoop(ClientWebSocket ws, CancellationToken ct)
+    private async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken ct)
     {
-        var buf = new byte[16 * 1024];
+        var buffer = new byte[16 * 1024];
         using var ms = new MemoryStream();
         while (ws.State == WebSocketState.Open)
         {
@@ -120,20 +173,19 @@ public sealed class SttClient : IDisposable
             WebSocketReceiveResult r;
             do
             {
-                r = await ws.ReceiveAsync(buf, ct);
+                r = await ws.ReceiveAsync(buffer, ct);
                 if (r.MessageType == WebSocketMessageType.Close) return;
-                ms.Write(buf, 0, r.Count);
+                ms.Write(buffer, 0, r.Count);
             } while (!r.EndOfMessage);
+
             try { Dispatch(JsonDocument.Parse(ms.ToArray()).RootElement.Clone()); }
             catch (JsonException) { }
         }
     }
 
-    void Dispatch(JsonElement m)
+    private void Dispatch(JsonElement m)
     {
-        string S(string k) => m.TryGetProperty(k, out var v) ? v.ToString() : "";
-        double D(string k) => m.TryGetProperty(k, out var v) && v.TryGetDouble(out var d) ? d : 0;
-        switch (S("type"))
+        switch (Str(m, "type"))
         {
             case "vad":
                 bool speech = m.TryGetProperty("speech", out var sp) && sp.GetBoolean();
@@ -143,16 +195,24 @@ public sealed class SttClient : IDisposable
                 _ = _ui.BeginInvoke(() => Transcribing?.Invoke());
                 break;
             case "utterance":
-                var u = new Utterance(S("text"), S("source"), (int)D("speech_ms"), (int)D("duration_ms"), (int)D("stt_ms"),
-                                      D("logprob"), D("no_speech_prob"), S("model"));
-                _ = _ui.BeginInvoke(() => UtteranceReady?.Invoke(u));
+                var utterance = ParseUtterance(m);
+                _ = _ui.BeginInvoke(() => UtteranceReady?.Invoke(utterance));
                 break;
             case "rejected":
-                var (reason, text) = (S("reason"), S("text"));
+                var (reason, text) = (Str(m, "reason"), Str(m, "text"));
                 _ = _ui.BeginInvoke(() => Rejected?.Invoke(reason, text));
                 break;
         }
     }
 
-    public void Dispose() => _life.Cancel();
+    /// <summary>Reads a sidecar <c>utterance</c> message; missing numbers read as 0.</summary>
+    internal static Utterance ParseUtterance(JsonElement m) =>
+        new(Str(m, "text"), Str(m, "source"), (int)Num(m, "speech_ms"), (int)Num(m, "duration_ms"), (int)Num(m, "stt_ms"),
+            Num(m, "logprob"), Num(m, "no_speech_prob"), Str(m, "model"));
+
+    private static string Str(JsonElement m, string key) => m.TryGetProperty(key, out var v) ? v.ToString() : "";
+
+    private static double Num(JsonElement m, string key) => m.TryGetProperty(key, out var v) && v.TryGetDouble(out var d) ? d : 0;
+
+    #endregion
 }

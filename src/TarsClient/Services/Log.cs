@@ -1,13 +1,19 @@
-using System.IO;
-
 namespace TarsClient.Services;
 
-/// <summary>Tiny append-only log at %APPDATA%\TARS\client.log (rolled at 1 MB).</summary>
+/// <summary>A tiny append-only log at <c>%APPDATA%\TARS\client.log</c>, rolled at 1 MB.</summary>
 public static class Log
 {
-    static readonly object Gate = new();
-    static readonly string PathName = Path.Combine(SettingsStore.Folder, "client.log");
+    #region Fields
 
+    private const long RollBytes = 1_000_000;
+    private static readonly object Gate = new();
+    private static readonly string PathName = Path.Combine(SettingsStore.Folder, "client.log");
+
+    #endregion
+
+    #region Public Methods
+
+    /// <summary>Appends a timestamped line. Logging must never take the app down, so failures are swallowed.</summary>
     public static void Write(string line)
     {
         lock (Gate)
@@ -15,14 +21,14 @@ public static class Log
             try
             {
                 Directory.CreateDirectory(SettingsStore.Folder);
-                var fi = new FileInfo(PathName);
-                if (fi.Exists && fi.Length > 1_000_000) File.Move(PathName, PathName + ".1", true);
+                var file = new FileInfo(PathName);
+                if (file.Exists && file.Length > RollBytes) File.Move(PathName, PathName + ".1", true);
                 File.AppendAllText(PathName, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {line}{Environment.NewLine}");
             }
-            catch (Exception ex)
-            {
-                try { File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tars-log-failure.txt"), $"{DateTime.Now:HH:mm:ss} {PathName}: {ex}{Environment.NewLine}"); } catch { }
-            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
+
+    #endregion
 }

@@ -2,22 +2,29 @@ using System.Runtime.InteropServices;
 
 namespace TarsClient.Native;
 
+/// <summary>The Win32, DWM, shell and NVML calls we need, and nothing else.</summary>
 internal static partial class Win32
 {
-    // ---- DWM: square corners on Windows 11
+    #region DWM: square corners on Windows 11
+
     public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     public const int DWMWCP_DONOTROUND = 1;
 
     [LibraryImport("dwmapi.dll")]
     public static partial int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
+    /// <summary>Asks DWM not to round the window's corners (a no-op before Windows 11).</summary>
     public static void DisableRoundedCorners(IntPtr hwnd)
     {
-        int pref = DWMWCP_DONOTROUND;
-        try { DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref pref, sizeof(int)); } catch { /* pre-Win11 */ }
+        int preference = DWMWCP_DONOTROUND;
+        try { DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref preference, sizeof(int)); }
+        catch (EntryPointNotFoundException) { }
     }
 
-    // ---- Extended window styles (click without taking focus)
+    #endregion
+
+    #region Window styles: click without taking focus
+
     public const int GWL_EXSTYLE = -20;
     public const long WS_EX_NOACTIVATE = 0x08000000L;
 
@@ -27,14 +34,20 @@ internal static partial class Win32
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
     public static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
 
+    /// <summary>Sets or clears <c>WS_EX_NOACTIVATE</c>: clicks land without pulling keyboard focus from other apps.</summary>
     public static void SetNoActivate(IntPtr hwnd, bool on)
     {
-        long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
-        ex = on ? ex | WS_EX_NOACTIVATE : ex & ~WS_EX_NOACTIVATE;
-        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(ex));
+        long style = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        style = on ? style | WS_EX_NOACTIVATE : style & ~WS_EX_NOACTIVATE;
+        SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(style));
     }
 
-    // ---- Taskbar flash
+    #endregion
+
+    #region Taskbar flash and foreground
+
+    public const uint FLASHW_ALL = 3, FLASHW_TIMERNOFG = 12, FLASHW_STOP = 0;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct FLASHWINFO
     {
@@ -45,48 +58,40 @@ internal static partial class Win32
         public uint dwTimeout;
     }
 
-    public const uint FLASHW_ALL = 3, FLASHW_TIMERNOFG = 12, FLASHW_STOP = 0;
-
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool FlashWindowEx(ref FLASHWINFO pwfi);
 
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetForegroundWindow(IntPtr hwnd);
+
+    /// <summary>Starts (until the window comes to the foreground) or stops flashing the taskbar button.</summary>
     public static void Flash(IntPtr hwnd, bool on)
     {
-        var fi = new FLASHWINFO
+        var info = new FLASHWINFO
         {
             cbSize = (uint)Marshal.SizeOf<FLASHWINFO>(),
             hwnd = hwnd,
             dwFlags = on ? FLASHW_ALL | FLASHW_TIMERNOFG : FLASHW_STOP,
             uCount = uint.MaxValue,
         };
-        FlashWindowEx(ref fi);
+        FlashWindowEx(ref info);
     }
 
-    [LibraryImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool SetForegroundWindow(IntPtr hwnd);
+    #endregion
 
-    // ---- Low-level hooks
-    public const int WH_KEYBOARD_LL = 13, WH_MOUSE_LL = 14;
+    #region Low-level keyboard hook
+
+    public const int WH_KEYBOARD_LL = 13;
     public const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
-    public const int WM_XBUTTONDOWN = 0x020B, WM_XBUTTONUP = 0x020C;
     public const int WM_QUIT = 0x0012;
     public const int WM_NCLBUTTONDBLCLK = 0x00A3;
-    public const uint LLKHF_INJECTED = 0x10;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct KBDLLHOOKSTRUCT
     {
         public uint vkCode, scanCode, flags, time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MSLLHOOKSTRUCT
-    {
-        public int x, y;
-        public uint mouseData, flags, time;
         public IntPtr dwExtraInfo;
     }
 
@@ -123,7 +128,10 @@ internal static partial class Win32
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr GetModuleHandle(string? name);
 
-    // ---- Fullscreen / presentation detection (game mode)
+    #endregion
+
+    #region Game mode: fullscreen detection and NVML
+
     public enum QUERY_USER_NOTIFICATION_STATE
     {
         QUNS_NOT_PRESENT = 1, QUNS_BUSY = 2, QUNS_RUNNING_D3D_FULL_SCREEN = 3,
@@ -133,9 +141,17 @@ internal static partial class Win32
     [DllImport("shell32.dll")]
     public static extern int SHQueryUserNotificationState(out QUERY_USER_NOTIFICATION_STATE state);
 
-    // ---- NVML (free VRAM)
     [StructLayout(LayoutKind.Sequential)]
-    public struct NvmlMemory { public ulong total, free, used; }
+    public struct NvmlMemory
+    {
+        public ulong total, free, used;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NvmlUtilization
+    {
+        public uint gpu, memory;
+    }
 
     [DllImport("nvml.dll", EntryPoint = "nvmlInit_v2")]
     public static extern int NvmlInit();
@@ -143,24 +159,15 @@ internal static partial class Win32
     [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetHandleByIndex_v2")]
     public static extern int NvmlDeviceGetHandleByIndex(uint index, out IntPtr device);
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct NvmlUtilization { public uint gpu, memory; }
+    [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetMemoryInfo")]
+    public static extern int NvmlDeviceGetMemoryInfo(IntPtr device, out NvmlMemory memory);
 
     [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetUtilizationRates")]
     public static extern int NvmlDeviceGetUtilizationRates(IntPtr device, out NvmlUtilization util);
 
-    [DllImport("nvml.dll", EntryPoint = "nvmlDeviceGetMemoryInfo")]
-    public static extern int NvmlDeviceGetMemoryInfo(IntPtr device, out NvmlMemory memory);
+    #endregion
 
-    // ---- Job object: the TTS sidecar dies with the client
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr CreateJobObject(IntPtr attrs, string? name);
-
-    [DllImport("kernel32.dll")]
-    public static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int length);
-
-    [DllImport("kernel32.dll")]
-    public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    #region Job object: the voice sidecar dies with the client
 
     public const int JobObjectExtendedLimitInformation = 9;
     public const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
@@ -190,6 +197,16 @@ internal static partial class Win32
         public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
     }
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr CreateJobObject(IntPtr attrs, string? name);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int length);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    /// <summary>A job that kills every process in it when our handle closes, i.e. when TARS exits for any reason.</summary>
     public static IntPtr CreateKillOnCloseJob()
     {
         var job = CreateJobObject(IntPtr.Zero, null);
@@ -198,4 +215,6 @@ internal static partial class Win32
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info));
         return job;
     }
+
+    #endregion
 }

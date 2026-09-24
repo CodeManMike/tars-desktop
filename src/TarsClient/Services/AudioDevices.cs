@@ -3,58 +3,99 @@ using NAudio.CoreAudioApi.Interfaces;
 
 namespace TarsClient.Services;
 
-public sealed record AudioDevice(string Id, string Name)
-{
-    public override string ToString() => Name;
-}
-
-/// <summary>Device lists, lookup by id, and change notifications (headset unplugged / default switched).</summary>
+/// <summary>Device lists, lookup by id, and change notifications (headset unplugged, default switched).</summary>
 public sealed class AudioDevices : IMMNotificationClient, IDisposable
 {
-    readonly MMDeviceEnumerator _en = new();
-    readonly System.Windows.Threading.DispatcherTimer _debounce;
+    #region Fields
+
+    private readonly MMDeviceEnumerator _enumerator = new();
+    private readonly DispatcherTimer _debounce;
+
+    #endregion
+
+    #region Constructor
+
+    /// <summary>Subscribes to endpoint notifications.</summary>
+    public AudioDevices()
+    {
+        _debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+        _debounce.Tick += (_, _) =>
+        {
+            _debounce.Stop();
+            Changed?.Invoke();
+        };
+        _enumerator.RegisterEndpointNotificationCallback(this);
+    }
+
+    #endregion
+
+    #region Events
 
     /// <summary>Raised on the UI thread, debounced, when anything about the endpoints changes.</summary>
     public event Action? Changed;
 
-    public AudioDevices()
-    {
-        _debounce = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
-        _debounce.Tick += (_, _) => { _debounce.Stop(); Changed?.Invoke(); };
-        _en.RegisterEndpointNotificationCallback(this);
-    }
+    #endregion
 
-    public static MMDevice? Find(MMDeviceEnumerator en, DataFlow flow, string id)
+    #region Public Methods
+
+    /// <summary>The active endpoint with <paramref name="id"/> and <paramref name="flow"/>, or null (empty id means default).</summary>
+    public static MMDevice? Find(MMDeviceEnumerator enumerator, DataFlow flow, string id)
     {
         if (string.IsNullOrEmpty(id)) return null;
         try
         {
-            var d = en.GetDevice(id);
-            return d.State == DeviceState.Active && d.DataFlow == flow ? d : null;
+            var device = enumerator.GetDevice(id);
+            return device.State == DeviceState.Active && device.DataFlow == flow ? device : null;
         }
-        catch { return null; }
+        catch (System.Runtime.InteropServices.COMException) { return null; }
     }
 
+    /// <summary>"DEFAULT" followed by every active endpoint of <paramref name="flow"/>.</summary>
     public static List<AudioDevice> List(DataFlow flow)
     {
         var list = new List<AudioDevice> { new("", "DEFAULT") };
-        using var en = new MMDeviceEnumerator();
-        foreach (var d in en.EnumerateAudioEndPoints(flow, DeviceState.Active))
-            list.Add(new(d.ID, d.FriendlyName));
+        using var enumerator = new MMDeviceEnumerator();
+        foreach (var device in enumerator.EnumerateAudioEndPoints(flow, DeviceState.Active))
+            list.Add(new(device.ID, device.FriendlyName));
         return list;
     }
 
-    void Poke() => System.Windows.Application.Current?.Dispatcher.BeginInvoke(() => { _debounce.Stop(); _debounce.Start(); });
-
+    /// <inheritdoc />
     public void OnDeviceStateChanged(string deviceId, DeviceState newState) => Poke();
+
+    /// <inheritdoc />
     public void OnDeviceAdded(string pwstrDeviceId) => Poke();
+
+    /// <inheritdoc />
     public void OnDeviceRemoved(string deviceId) => Poke();
-    public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId) { if (role == Role.Multimedia || role == Role.Communications) Poke(); }
+
+    /// <inheritdoc />
+    public void OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
+    {
+        if (role is Role.Multimedia or Role.Communications) Poke();
+    }
+
+    /// <inheritdoc />
     public void OnPropertyValueChanged(string pwstrDeviceId, PropertyKey key) { }
 
+    /// <inheritdoc />
     public void Dispose()
     {
-        try { _en.UnregisterEndpointNotificationCallback(this); } catch { }
-        _en.Dispose();
+        try { _enumerator.UnregisterEndpointNotificationCallback(this); }
+        catch (System.Runtime.InteropServices.COMException) { }
+        _enumerator.Dispose();
     }
+
+    #endregion
+
+    #region Private Methods
+
+    /// <summary>Notifications arrive on a COM thread; we restart the debounce on the UI thread.</summary>
+    private void Poke() => Application.Current?.Dispatcher.BeginInvoke(() =>
+    {
+        _debounce.Stop();
+        _debounce.Start();
+    });
+
+    #endregion
 }

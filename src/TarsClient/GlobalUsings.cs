@@ -1,0 +1,13 @@
+global using System.IO;
+global using System.Net.Http;
+global using System.Text;
+global using System.Text.Json;
+global using System.Windows;
+global using System.Windows.Threading;
+global using TarsClient.Models;
+global using TarsClient.Native;
+global using TarsClient.Services;
+global using System.Collections.ObjectModel;
+global using CommunityToolkit.Mvvm.ComponentModel;
+global using CommunityToolkit.Mvvm.Input;
+global using TarsClient.ViewModels;

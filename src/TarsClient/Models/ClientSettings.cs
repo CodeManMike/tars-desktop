@@ -1,86 +1,122 @@
-using System.Text.Json.Serialization;
-
 namespace TarsClient.Models;
 
-/// <summary>%APPDATA%\TARS\client.json (spec section 8).</summary>
+/// <summary>
+/// Everything the client remembers between runs, stored as <c>%APPDATA%\TARS\client.json</c> (spec section 8).
+/// </summary>
 public sealed class ClientSettings
 {
+    #region Connection
+
+    /// <summary>The server's WebSocket endpoint.</summary>
     public string ServerUrl { get; set; } = "wss://192.168.86.243:8765/ws";
-    /// <summary>Plain key: only ever in memory. On disk it's cleared and <see cref="AccessKeyProtected"/> holds it.</summary>
+
+    /// <summary>The access key in plain text. We only ever hold it in memory; on disk it lives in <see cref="AccessKeyProtected"/>.</summary>
     public string AccessKey { get; set; } = "";
+
+    /// <summary>The access key sealed with DPAPI (CurrentUser).</summary>
+    public string AccessKeyProtected { get; set; } = "";
+
+    #endregion
+
+    #region Listening
+
+    /// <summary>Listening mode: <c>ptt</c>, <c>wake</c> or <c>open</c>.</summary>
     public string Mode { get; set; } = "wake";
-    public double Volume { get; set; } = 1.0;
-    public bool Topmost { get; set; } = true;
-    public string Layout { get; set; } = "compact";
-    public LayoutBounds Bounds { get; set; } = new();
+
+    /// <summary>Hold-to-talk key, as a WPF <c>Key</c> name.</summary>
     public string PttKey { get; set; } = "RightCtrl";
+
+    /// <summary>Whether the PTT key is hidden from other apps while TARS uses it.</summary>
     public bool PttSwallow { get; set; }
+
+    /// <summary>Global stop / dismiss combination, e.g. <c>Ctrl+Alt+S</c>.</summary>
     public string StopHotkey { get; set; } = "Ctrl+Alt+S";
-    public string InputDevice { get; set; } = "";
-    public string OutputDevice { get; set; } = "";
-    public int EchoTailMs { get; set; } = 300;
-    public bool StartWithWindows { get; set; } = true;
-    public bool StartMinimized { get; set; }
-    public bool Scanlines { get; set; } = true;
-    public bool Glow { get; set; } = true;
-    public double FontSize { get; set; } = 18;
-    public int TypewriterCps { get; set; } = 90;
-    public bool ShowDetails { get; set; }
-    public bool SpeakTyped { get; set; } = true;
+
+    /// <summary>Mic muted inside TARS (not in Windows).</summary>
     public bool MicMuted { get; set; }
-    /// <summary>Background alpha (text stays solid). Below 1.0 the window is layered; takes effect on restart.</summary>
+
+    /// <summary>How long the mic stays deaf after TARS stops talking, so it never hears itself.</summary>
+    public int EchoTailMs { get; set; } = 300;
+
+    #endregion
+
+    #region Audio
+
+    /// <summary>Output volume, 0–1.5.</summary>
+    public double Volume { get; set; } = 1.0;
+
+    /// <summary>Capture endpoint id; empty means the Windows default.</summary>
+    public string InputDevice { get; set; } = "";
+
+    /// <summary>Render endpoint id; empty means the Windows default.</summary>
+    public string OutputDevice { get; set; } = "";
+
+    /// <summary>Whether typed messages are answered out loud.</summary>
+    public bool SpeakTyped { get; set; } = true;
+
+    #endregion
+
+    #region Window
+
+    /// <summary>Always on top.</summary>
+    public bool Topmost { get; set; } = true;
+
+    /// <summary><c>compact</c> or <c>expanded</c>.</summary>
+    public string Layout { get; set; } = "compact";
+
+    /// <summary>Remembered position and size of each layout.</summary>
+    public LayoutBounds Bounds { get; set; } = new();
+
+    /// <summary>Background alpha (text stays solid). Below 1.0 the window is layered, which takes effect on restart.</summary>
     public double BackgroundOpacity { get; set; } = 1.0;
+
+    /// <summary>Whether the window has a taskbar button (off means tray only).</summary>
     public bool ShowInTaskbar { get; set; } = true;
+
     /// <summary>Show the window when TARS answers while it's hidden in the tray.</summary>
     public bool PopOnReply { get; set; }
-    /// <summary>Clicking TARS doesn't take keyboard focus from the app you're in (the prompt and settings still do).</summary>
+
+    /// <summary>Clicking TARS doesn't take keyboard focus from the app we're in (the prompt and settings still do).</summary>
     public bool NoActivate { get; set; } = true;
-    public string VoiceEngine { get; set; } = "local";
+
+    #endregion
+
+    #region Display
+
+    /// <summary>CRT scanline overlay.</summary>
+    public bool Scanlines { get; set; } = true;
+
+    /// <summary>Phosphor glow on text.</summary>
+    public bool Glow { get; set; } = true;
+
+    /// <summary>Base font size in the compact layout (the expanded layout adds 2).</summary>
+    public double FontSize { get; set; } = 18;
+
+    /// <summary>Typewriter reveal speed, characters per second.</summary>
+    public int TypewriterCps { get; set; } = 90;
+
+    /// <summary>Show timings, tools and ignored sounds in the scrollback.</summary>
+    public bool ShowDetails { get; set; }
+
+    #endregion
+
+    #region Startup
+
+    /// <summary>Register TARS in the Windows Run key.</summary>
+    public bool StartWithWindows { get; set; } = true;
+
+    /// <summary>Start hidden in the tray.</summary>
+    public bool StartMinimized { get; set; }
+
+    #endregion
+
+    #region Voice and speech
+
+    /// <summary>Local text-to-speech settings.</summary>
     public TtsSettings Tts { get; set; } = new();
+
+    /// <summary>Local speech-to-text settings.</summary>
     public SttSettings Stt { get; set; } = new();
-    public string AccessKeyProtected { get; set; } = "";
-}
 
-public sealed class LayoutBounds
-{
-    public double[] Compact { get; set; } = [1500, 60, 380, 150];
-    public double[] Expanded { get; set; } = [1200, 60, 640, 520];
+    #endregion
 }
-
-public sealed class TtsSettings
-{
-    public string SidecarUrl { get; set; } = "http://127.0.0.1:8880";
-    public string Engine { get; set; } = "turbo";
-    public string ReferenceClip { get; set; } = "";
-    public double Exaggeration { get; set; } = 0.30;
-    public double Pace { get; set; } = 0.35;
-    public double Speed { get; set; } = 1.0;
-    public double Temperature { get; set; } = 0.7;
-    /// <summary>TARS FX varispeed: 1.0 = off, 0.95 = a touch deeper and slower.</summary>
-    public double FxPitch { get; set; } = 0.95;
-    /// <summary>TARS FX metallic ring (comb gain) 0..0.5.</summary>
-    public double FxRing { get; set; } = 0.22;
-    /// <summary>TARS FX: slight pitch drop plus a small metallic speaker colouring, applied on the client.</summary>
-    public bool Fx { get; set; } = true;
-    public bool GameMode { get; set; } = true;
-    /// <summary>Always-on friendly default: free the GPU after 10 idle minutes.</summary>
-    public int IdleUnloadMinutes { get; set; } = 10;
-    public Dictionary<string, int> LabRatings { get; set; } = new();
-}
-
-public sealed class SttSettings
-{
-    /// <summary>"local": Whisper on this PC via the sidecar (falls back to the server when it's down). "server": stream audio as before.</summary>
-    public string Mode { get; set; } = "local";
-    public string Model { get; set; } = "large-v3-turbo";
-    /// <summary>CPU model while a game has the GPU.</summary>
-    public string GameModel { get; set; } = "small.en";
-    /// <summary>Only your voice (voiceprint) starts hands-free turns; YouTube/TV/other people are dropped before Whisper.</summary>
-    public bool VoiceLock { get; set; }
-    public string Voiceprint { get; set; } = "";
-    public double SpeakerThreshold { get; set; } = 0.67;
-}
-
-[JsonSerializable(typeof(ClientSettings))]
-[JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
-internal partial class SettingsJsonContext : JsonSerializerContext;

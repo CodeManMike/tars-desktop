@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TarsClient/TarsClient.csproj" />
+    <Project Path="src/TarsSetup/TarsSetup.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TarsClient.Tests/TarsClient.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,70 +1,103 @@
-using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
-using System.Windows.Threading;
 
 namespace TarsClient.Controls;
 
 /// <summary>
 /// Replaces a TextBox's thin caret with a blinking block <c>▌</c> (530 ms), drawn by an adorner at the caret position.
-/// Usage: <c>c:BlockCaret.Enabled="True"</c>. Blinks only while focused, so an idle window renders nothing.
+/// Usage: <c>c:BlockCaret.Enabled="True"</c>. It blinks only while focused, so an idle window renders nothing.
 /// </summary>
 public static class BlockCaret
 {
+    #region Fields
+
+    /// <summary>Identifies the <c>Enabled</c> attached property.</summary>
     public static readonly DependencyProperty EnabledProperty = DependencyProperty.RegisterAttached(
         "Enabled", typeof(bool), typeof(BlockCaret), new PropertyMetadata(false, OnEnabled));
 
-    public static bool GetEnabled(DependencyObject d) => (bool)d.GetValue(EnabledProperty);
-    public static void SetEnabled(DependencyObject d, bool v) => d.SetValue(EnabledProperty, v);
+    #endregion
 
-    static void OnEnabled(DependencyObject d, DependencyPropertyChangedEventArgs e)
+    #region Public Methods
+
+    /// <summary>Gets whether the block caret is on.</summary>
+    public static bool GetEnabled(DependencyObject d) => (bool)d.GetValue(EnabledProperty);
+
+    /// <summary>Turns the block caret on or off.</summary>
+    public static void SetEnabled(DependencyObject d, bool value) => d.SetValue(EnabledProperty, value);
+
+    #endregion
+
+    #region Private Methods
+
+    private static void OnEnabled(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is not TextBox tb || e.NewValue is not true) return;
-        tb.CaretBrush = Brushes.Transparent;
-        tb.Loaded += (_, _) =>
+        if (d is not TextBox box || e.NewValue is not true) return;
+        box.CaretBrush = Brushes.Transparent;
+        box.Loaded += (_, _) =>
         {
-            var layer = AdornerLayer.GetAdornerLayer(tb);
-            if (layer == null || tb.Tag is CaretAdorner) return;
-            var ad = new CaretAdorner(tb);
-            tb.Tag = ad;
-            layer.Add(ad);
+            var layer = AdornerLayer.GetAdornerLayer(box);
+            if (layer == null || box.Tag is CaretAdorner) return;
+            var adorner = new CaretAdorner(box);
+            box.Tag = adorner;
+            layer.Add(adorner);
         };
     }
 
-    sealed class CaretAdorner : Adorner
+    #endregion
+
+    #region Nested Types
+
+    private sealed class CaretAdorner : Adorner
     {
-        readonly TextBox _tb;
-        readonly DispatcherTimer _blink = new() { Interval = TimeSpan.FromMilliseconds(530) };
-        bool _on = true;
+        private readonly TextBox _box;
+        private readonly DispatcherTimer _blink = new() { Interval = TimeSpan.FromMilliseconds(530) };
+        private bool _on = true;
 
-        public CaretAdorner(TextBox tb) : base(tb)
+        public CaretAdorner(TextBox box) : base(box)
         {
-            _tb = tb;
+            _box = box;
             IsHitTestVisible = false;
-            _blink.Tick += (_, _) => { _on = !_on; InvalidateVisual(); };
-            tb.GotKeyboardFocus += (_, _) => Restart();
-            tb.LostKeyboardFocus += (_, _) => { _blink.Stop(); InvalidateVisual(); };
-            tb.SelectionChanged += (_, _) => Restart();
-            tb.TextChanged += (_, _) => Restart();
-            tb.IsVisibleChanged += (_, _) => { if (!tb.IsVisible) _blink.Stop(); };
-        }
-
-        void Restart()
-        {
-            _on = true;
-            if (_tb.IsKeyboardFocused) { _blink.Stop(); _blink.Start(); }
-            InvalidateVisual();
+            _blink.Tick += (_, _) =>
+            {
+                _on = !_on;
+                InvalidateVisual();
+            };
+            box.GotKeyboardFocus += (_, _) => Restart();
+            box.LostKeyboardFocus += (_, _) =>
+            {
+                _blink.Stop();
+                InvalidateVisual();
+            };
+            box.SelectionChanged += (_, _) => Restart();
+            box.TextChanged += (_, _) => Restart();
+            box.IsVisibleChanged += (_, _) =>
+            {
+                if (!box.IsVisible) _blink.Stop();
+            };
         }
 
         protected override void OnRender(DrawingContext dc)
         {
-            if (!_tb.IsKeyboardFocused || !_on) return;
-            var r = _tb.GetRectFromCharacterIndex(_tb.CaretIndex);
-            if (r.IsEmpty || double.IsInfinity(r.X)) r = new Rect(0, 0, 0, _tb.ActualHeight);
-            double w = Math.Max(4, _tb.FontSize * 0.28);
+            if (!_box.IsKeyboardFocused || !_on) return;
+            var caret = _box.GetRectFromCharacterIndex(_box.CaretIndex);
+            if (caret.IsEmpty || double.IsInfinity(caret.X)) caret = new Rect(0, 0, 0, _box.ActualHeight);
+            double width = Math.Max(4, _box.FontSize * 0.28);
             var brush = (Brush)Application.Current.Resources["Fg"];
-            dc.DrawRectangle(brush, null, new Rect(r.X, r.Y + 1, w, Math.Max(4, r.Height - 2)));
+            dc.DrawRectangle(brush, null, new Rect(caret.X, caret.Y + 1, width, Math.Max(4, caret.Height - 2)));
+        }
+
+        private void Restart()
+        {
+            _on = true;
+            if (_box.IsKeyboardFocused)
+            {
+                _blink.Stop();
+                _blink.Start();
+            }
+            InvalidateVisual();
         }
     }
+
+    #endregion
 }

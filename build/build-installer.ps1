@@ -24,7 +24,7 @@ dotnet publish (Join-Path $root 'src\TarsSetup\TarsSetup.csproj') -c $Configurat
     -p:DebugType=none -p:PayloadZip=$zip -o (Join-Path $art 'setup')
 if ($LASTEXITCODE) { throw 'setup publish failed' }
 
-$version = ([xml](Get-Content (Join-Path $root 'src\TarsClient\TarsClient.csproj'))).Project.PropertyGroup.Version | Select-Object -First 1
+$version = dotnet msbuild (Join-Path $root 'src\TarsClient\TarsClient.csproj') -getProperty:Version   # from Directory.Build.props
 $out = Join-Path $art "TARS-Setup-$version.exe"
 Move-Item (Join-Path $art 'setup\TARS-Setup.exe') $out -Force
 # The same program named TARS-Uninstall.exe opens straight into uninstall mode.

@@ -1,29 +1,49 @@
-using System.IO;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Windows.Threading;
 using Microsoft.Win32;
-using TarsClient.Models;
 
 namespace TarsClient.Services;
 
-/// <summary>Loads and saves client.json; the access key is DPAPI-protected (CurrentUser) on disk.</summary>
+/// <summary>Loads and saves <c>client.json</c>. The access key is sealed with DPAPI (CurrentUser) on disk.</summary>
 public sealed class SettingsStore
 {
-    public static string Folder { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TARS");
-    public static string FilePath { get; } = Path.Combine(Folder, "client.json");
+    #region Fields
 
-    readonly DispatcherTimer _debounce;
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private readonly DispatcherTimer _debounce;
 
-    public ClientSettings Current { get; private set; } = new();
+    #endregion
 
+    #region Constructor
+
+    /// <summary>Creates the store; <see cref="Save"/> writes 600 ms after the last change.</summary>
     public SettingsStore()
     {
         _debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
-        _debounce.Tick += (_, _) => { _debounce.Stop(); SaveNow(); };
+        _debounce.Tick += (_, _) =>
+        {
+            _debounce.Stop();
+            SaveNow();
+        };
     }
 
+    #endregion
+
+    #region Properties
+
+    /// <summary><c>%APPDATA%\TARS</c>: settings, logs and voices.</summary>
+    public static string Folder { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TARS");
+
+    /// <summary><c>%APPDATA%\TARS\client.json</c>.</summary>
+    public static string FilePath { get; } = Path.Combine(Folder, "client.json");
+
+    /// <summary>The live settings.</summary>
+    public ClientSettings Current { get; private set; } = new();
+
+    #endregion
+
+    #region Public Methods
+
+    /// <summary>Reads <c>client.json</c>. An unreadable file is kept as <c>.bad</c> and we start from defaults.</summary>
     public void Load()
     {
         try
@@ -31,21 +51,25 @@ public sealed class SettingsStore
             if (File.Exists(FilePath))
                 Current = JsonSerializer.Deserialize(File.ReadAllText(FilePath), SettingsJsonContext.Default.ClientSettings) ?? new();
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is JsonException or IOException)
         {
             Log.Write($"settings: unreadable ({ex.Message}); using defaults");
-            try { File.Copy(FilePath, FilePath + ".bad", true); } catch { }
+            try { File.Copy(FilePath, FilePath + ".bad", true); } catch (IOException) { }
             Current = new();
         }
+
         Current.AccessKey = Unprotect(Current.AccessKeyProtected);
-        if (Current.PttKey.StartsWith("Mouse", StringComparison.OrdinalIgnoreCase)) Current.PttKey = "RightCtrl";
-        // 0.72 was the first default and rejected the owner's relaxed speech (0.70-0.76 in real use).
-        if (Math.Abs(Current.Stt.SpeakerThreshold - 0.72) < 0.001) Current.Stt.SpeakerThreshold = 0.67;
+        Migrate(Current);
     }
 
-    /// <summary>Saves shortly after the last change (slider drags don't hammer the disk).</summary>
-    public void Save() { _debounce.Stop(); _debounce.Start(); }
+    /// <summary>Saves shortly after the last change, so slider drags don't hammer the disk.</summary>
+    public void Save()
+    {
+        _debounce.Stop();
+        _debounce.Start();
+    }
 
+    /// <summary>Saves now (atomically, via a temp file).</summary>
     public void SaveNow()
     {
         try
@@ -56,41 +80,69 @@ public sealed class SettingsStore
             Current.AccessKey = "";
             var json = JsonSerializer.Serialize(Current, SettingsJsonContext.Default.ClientSettings);
             Current.AccessKey = plain;
+
             var tmp = FilePath + ".tmp";
             File.WriteAllText(tmp, json);
             File.Move(tmp, FilePath, true);
         }
-        catch (Exception ex) { Log.Write($"settings: save failed: {ex.Message}"); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
+        {
+            Log.Write($"settings: save failed: {ex.Message}");
+        }
     }
 
-    static string Protect(string plain)
-    {
-        if (string.IsNullOrEmpty(plain)) return "";
-        var bytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), null, DataProtectionScope.CurrentUser);
-        return Convert.ToBase64String(bytes);
-    }
-
-    static string Unprotect(string blob)
-    {
-        if (string.IsNullOrEmpty(blob)) return "";
-        try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(blob), null, DataProtectionScope.CurrentUser)); }
-        catch { return ""; }
-    }
-
-    const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-
+    /// <summary>Adds or removes TARS from the Windows Run key.</summary>
     public static void ApplyStartWithWindows(bool enabled, bool minimized)
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RunKey, true) ?? Registry.CurrentUser.CreateSubKey(RunKey);
-            if (enabled)
+            if (!enabled)
             {
-                var exe = Environment.ProcessPath ?? "";
-                key.SetValue("TARS", minimized ? $"\"{exe}\" --minimized" : $"\"{exe}\"");
+                key.DeleteValue("TARS", false);
+                return;
             }
-            else key.DeleteValue("TARS", false);
+            var exe = Environment.ProcessPath ?? "";
+            key.SetValue("TARS", minimized ? $"\"{exe}\" --minimized" : $"\"{exe}\"");
         }
-        catch (Exception ex) { Log.Write($"startup: {ex.Message}"); }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException)
+        {
+            Log.Write($"startup: {ex.Message}");
+        }
     }
+
+    #endregion
+
+    #region Private Methods
+
+    /// <summary>Upgrades values that earlier versions defaulted differently.</summary>
+    private static void Migrate(ClientSettings s)
+    {
+        // Mouse side buttons were dropped as PTT keys: they're used elsewhere.
+        if (s.PttKey.StartsWith("Mouse", StringComparison.OrdinalIgnoreCase)) s.PttKey = "RightCtrl";
+        // 0.72 was the first voice-lock default and rejected the owner's relaxed speech (0.70–0.76 in real use).
+        if (Math.Abs(s.Stt.SpeakerThreshold - 0.72) < 0.001) s.Stt.SpeakerThreshold = 0.67;
+    }
+
+    private static string Protect(string plain)
+    {
+        if (string.IsNullOrEmpty(plain)) return "";
+        var sealedBytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(plain), null, DataProtectionScope.CurrentUser);
+        return Convert.ToBase64String(sealedBytes);
+    }
+
+    private static string Unprotect(string blob)
+    {
+        if (string.IsNullOrEmpty(blob)) return "";
+        try
+        {
+            return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(blob), null, DataProtectionScope.CurrentUser));
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException)
+        {
+            return "";   // sealed by another user or machine: we re-provision the key from the server
+        }
+    }
+
+    #endregion
 }

@@ -1,34 +1,46 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
-using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using TarsClient.Native;
-using TarsClient.ViewModels;
+using System.Windows.Media.Effects;
+using TarsClient.Controls;
 
 namespace TarsClient.Views;
 
+/// <summary>
+/// The one window: a compact strip that becomes a full terminal when taller than <see cref="ExpandThreshold"/>. Owns
+/// window chrome, focus behaviour, layout and bounds, and keyboard handling; everything else lives in the view model.
+/// </summary>
 public partial class MainWindow : Window
 {
-    const double ExpandThreshold = 240;     // taller than this = expanded terminal
+    #region Fields
 
-    const string BannerArt =
+    private const double ExpandThreshold = 240;
+    private const int WM_EXITSIZEMOVE = 0x0232;
+
+    private const string BannerArt =
         " _____        _        ____      ____  \n" +
         "|_   _|      / \\      |  _ \\    / ___| \n" +
         "  | |       / _ \\     | |_) |   \\___ \\ \n" +
         "  | |   _  / ___ \\  _ |  _ <  _  ___) |\n" +
         "  |_|  (_)/_/   \\_\\(_)|_| \\_\\(_)|____/ ";
 
-    readonly MainViewModel _vm;
-    readonly SolidColorBrush _cursorBrush = new(Color.FromRgb(0xFF, 0xB3, 0x47));
-    IntPtr _hwnd;
-    bool _applyingBounds;
+    private static readonly Color Amber = Color.FromRgb(0xFF, 0xB3, 0x47);
 
-    public bool AllowClose { get; set; }
+    private readonly MainViewModel _vm;
+    private readonly SolidColorBrush _cursorBrush = new(Amber);
+    private IntPtr _hwnd;
+    private bool _applyingBounds;
+    private bool _spacePtt;
 
+    #endregion
+
+    #region Constructor
+
+    /// <summary>Creates the window for <paramref name="vm"/>.</summary>
     public MainWindow(MainViewModel vm)
     {
         _vm = vm;
@@ -39,22 +51,19 @@ public partial class MainWindow : Window
         InitializeComponent();
         Banner.Text = BannerArt;
         ApplyWindowOptions();
-        vm.AppearanceChanged += ApplyWindowOptions;
-
         ApplyBounds(vm.IsExpanded);
         ApplyFont();
         ApplyGlow();
 
+        vm.AppearanceChanged += ApplyWindowOptions;
         vm.PropertyChanged += OnVmChanged;
         vm.Lines.CollectionChanged += OnLinesChanged;
         vm.Settings.LogLines.CollectionChanged += (_, _) => LogScroll.ScrollToEnd();
+        vm.Settings.PropertyChanged += OnSettingsChanged;
         vm.ShowRequested += alarm => ShowFromTray(alarm);
-        vm.AlarmStopped += () => { if (_hwnd != IntPtr.Zero) Win32.Flash(_hwnd, false); };
-        vm.Settings.PropertyChanged += (_, e) =>
+        vm.AlarmStopped += () =>
         {
-            if (e.PropertyName == nameof(SettingsViewModel.ConfirmVisible) && vm.Settings.ConfirmVisible)
-                Dispatcher.BeginInvoke(() => ConfirmYes.Focus());
-            if (e.PropertyName == nameof(SettingsViewModel.TabIndex)) FocusFirstInTab();
+            if (_hwnd != IntPtr.Zero) Win32.Flash(_hwnd, false);
         };
 
         SourceInitialized += OnSourceInitialized;
@@ -62,53 +71,86 @@ public partial class MainWindow : Window
         IsVisibleChanged += (_, _) => UpdateVisibility();
         StateChanged += (_, _) => UpdateVisibility();
         LocationChanged += (_, _) => SaveBounds();
-        SizeChanged += (_, _) => { SaveBounds(); KeepReplyAtEnd(); };
+        SizeChanged += (_, _) =>
+        {
+            SaveBounds();
+            KeepReplyAtEnd();
+        };
         PreviewKeyDown += OnPreviewKeyDown;
         PreviewKeyUp += OnPreviewKeyUp;
         PreviewTextInput += OnPreviewTextInput;
         PreviewMouseDown += OnPreviewMouseDown;
-        Deactivated += (_, _) => { if (_spacePtt) { _spacePtt = false; _ = _vm.PttEnd(); } };
+        Deactivated += (_, _) => EndSpacePtt();
     }
 
-    // ================================================================== window options
+    #endregion
 
-    void ApplyWindowOptions()
-    {
-        byte alpha = (byte)Math.Round(Math.Clamp(_vm.S.BackgroundOpacity, 0.2, 1) * 255);
-        Background = AllowsTransparency ? new SolidColorBrush(Color.FromArgb(alpha, 0, 0, 0)) : Brushes.Black;
-        ShowInTaskbar = _vm.S.ShowInTaskbar;
-        if (_hwnd != IntPtr.Zero) Win32.SetNoActivate(_hwnd, _vm.S.NoActivate);
-    }
+    #region Properties
 
-    /// <summary>
-    /// With "don't steal focus" on, clicks on buttons, meters and the title bar leave the keyboard where it was;
-    /// clicking something you type into (the prompt, settings fields) takes focus deliberately.
-    /// </summary>
-    void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    /// <summary>Set by Quit: [×] and Alt+F4 otherwise hide to the tray.</summary>
+    public bool AllowClose { get; set; }
+
+    private static bool TypingSomewhere => Keyboard.FocusedElement is TextBox or PasswordBox;
+
+    #endregion
+
+    #region Public Methods
+
+    /// <summary>Shows and activates the window; for an alarm, also topmost with a flashing taskbar button.</summary>
+    public void ShowFromTray(bool alarm = false)
     {
-        if (_vm.AlarmActive) { _vm.Dismiss(); return; }
-        if (!_vm.S.NoActivate || IsActive) return;
-        for (var d = e.OriginalSource as DependencyObject; d != null; d = d is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d))
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        if (alarm)
         {
-            if (d is TextBox or PasswordBox or ListBox or Controls.BlockSlider or Controls.ChoiceRow || d == Scrollback || d == ReplyScroll)
-            {
-                Activate();
-                return;
-            }
+            Topmost = true;
+            Win32.Flash(_hwnd, true);
         }
-        if (_vm.SettingsOpen) Activate();
-    }
-
-    void Settings_Click(object sender, RoutedEventArgs e)
-    {
-        if (_vm.SettingsOpen) { _vm.SettingsOpen = false; return; }
         Activate();
-        OpenSettings();
+        Win32.SetForegroundWindow(_hwnd);
     }
 
-    // ================================================================== native bits
+    /// <summary>Tray click: hide if showing, otherwise show.</summary>
+    public void ToggleVisible()
+    {
+        if (IsVisible && WindowState != WindowState.Minimized) Hide();
+        else ShowFromTray();
+    }
 
-    void OnSourceInitialized(object? sender, EventArgs e)
+    /// <summary>Opens settings, expanding the window first.</summary>
+    public void OpenSettings()
+    {
+        if (!_vm.IsExpanded) ToggleLayout();
+        _vm.SettingsOpen = true;
+    }
+
+    #endregion
+
+    #region Protected Methods
+
+    /// <inheritdoc />
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (!AllowClose)
+        {
+            e.Cancel = true;
+            Hide();
+        }
+        base.OnClosing(e);
+    }
+
+    /// <inheritdoc />
+    protected override void OnContentRendered(EventArgs e)
+    {
+        base.OnContentRendered(e);
+        KeyBox.Password = _vm.Settings.AccessKey;
+    }
+
+    #endregion
+
+    #region Window chrome and focus
+
+    private void OnSourceInitialized(object? sender, EventArgs e)
     {
         _hwnd = new WindowInteropHelper(this).Handle;
         Win32.DisableRoundedCorners(_hwnd);
@@ -116,9 +158,7 @@ public partial class MainWindow : Window
         HwndSource.FromHwnd(_hwnd)?.AddHook(WndProc);
     }
 
-    const int WM_EXITSIZEMOVE = 0x0232;
-
-    IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         switch (msg)
         {
@@ -134,69 +174,74 @@ public partial class MainWindow : Window
         return IntPtr.Zero;
     }
 
-    void PowerOnAnimation()
+    private void ApplyWindowOptions()
     {
-        // CRT power-on: a bright line opens vertically into the picture.
+        byte alpha = (byte)Math.Round(Math.Clamp(_vm.S.BackgroundOpacity, 0.2, 1) * 255);
+        Background = AllowsTransparency ? new SolidColorBrush(Color.FromArgb(alpha, 0, 0, 0)) : Brushes.Black;
+        ShowInTaskbar = _vm.S.ShowInTaskbar;
+        if (_hwnd != IntPtr.Zero) Win32.SetNoActivate(_hwnd, _vm.S.NoActivate);
+    }
+
+    /// <summary>
+    /// With "don't steal focus" on, clicks on buttons, meters and the title bar leave the keyboard where it was;
+    /// clicking something you type into (the prompt, settings fields) takes focus deliberately.
+    /// </summary>
+    private void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_vm.AlarmActive)
+        {
+            _vm.Dismiss();
+            return;
+        }
+        if (!_vm.S.NoActivate || IsActive) return;
+        if (WantsFocus(e.OriginalSource as DependencyObject) || _vm.SettingsOpen) Activate();
+    }
+
+    private bool WantsFocus(DependencyObject? d)
+    {
+        for (; d != null; d = d is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d))
+        {
+            if (d is TextBox or PasswordBox or ListBox or BlockSlider or ChoiceRow || d == Scrollback || d == ReplyScroll) return true;
+        }
+        return false;
+    }
+
+    /// <summary>CRT power-on: a bright line opens vertically into the picture.</summary>
+    private void PowerOnAnimation()
+    {
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
         PowerOn.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.01, 1, TimeSpan.FromMilliseconds(260)) { EasingFunction = ease });
         PowerOn.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.6, 1, TimeSpan.FromMilliseconds(160)) { EasingFunction = ease });
         Screen.BeginAnimation(OpacityProperty, new DoubleAnimation(0.3, 1, TimeSpan.FromMilliseconds(320)));
     }
 
-    // ================================================================== visibility → resource use
-
-    void UpdateVisibility()
+    /// <summary>Hidden or minimized: no meters, no cursor blink, zero animation frames.</summary>
+    private void UpdateVisibility()
     {
         bool visible = IsVisible && WindowState != WindowState.Minimized;
         _vm.SetVisible(visible);
-        if (visible)
+        if (!visible)
         {
-            var blink = new ColorAnimationUsingKeyFrames { RepeatBehavior = RepeatBehavior.Forever, Duration = TimeSpan.FromMilliseconds(1060) };
-            blink.KeyFrames.Add(new DiscreteColorKeyFrame(Color.FromRgb(0xFF, 0xB3, 0x47), KeyTime.FromTimeSpan(TimeSpan.Zero)));
-            blink.KeyFrames.Add(new DiscreteColorKeyFrame(Colors.Transparent, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(530))));
-            _cursorBrush.BeginAnimation(SolidColorBrush.ColorProperty, blink);
+            _cursorBrush.BeginAnimation(SolidColorBrush.ColorProperty, null);
+            return;
         }
-        else _cursorBrush.BeginAnimation(SolidColorBrush.ColorProperty, null);   // hidden: zero animation frames
+        var blink = new ColorAnimationUsingKeyFrames { RepeatBehavior = RepeatBehavior.Forever, Duration = TimeSpan.FromMilliseconds(1060) };
+        blink.KeyFrames.Add(new DiscreteColorKeyFrame(Amber, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+        blink.KeyFrames.Add(new DiscreteColorKeyFrame(Colors.Transparent, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(530))));
+        _cursorBrush.BeginAnimation(SolidColorBrush.ColorProperty, blink);
     }
 
-    public void ShowFromTray(bool alarm = false)
-    {
-        Show();
-        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-        if (alarm)
-        {
-            Topmost = true;
-            Win32.Flash(_hwnd, true);
-        }
-        Activate();
-        Win32.SetForegroundWindow(_hwnd);
-    }
+    #endregion
 
-    public void ToggleVisible()
-    {
-        if (IsVisible && WindowState != WindowState.Minimized) Hide();
-        else ShowFromTray();
-    }
+    #region Layout and bounds
 
-    protected override void OnClosing(CancelEventArgs e)
-    {
-        if (!AllowClose)
-        {
-            e.Cancel = true;      // [×] and Alt+F4 hide to the tray; Quit lives in the tray menu
-            Hide();
-        }
-        base.OnClosing(e);
-    }
-
-    // ================================================================== layout + bounds
-
-    void OnVmChanged(object? sender, PropertyChangedEventArgs e)
+    private void OnVmChanged(object? sender, PropertyChangedEventArgs e)
     {
         switch (e.PropertyName)
         {
             case nameof(MainViewModel.IsExpanded):
                 ApplyFont();
-                if (_vm.IsExpanded) Dispatcher.BeginInvoke(() => { Scrollback.ScrollToEnd(); ExpandedPrompt.Focus(); });
+                if (_vm.IsExpanded) FocusTerminal();
                 else if (_vm.SettingsOpen) _vm.SettingsOpen = false;
                 break;
             case nameof(MainViewModel.BaseFontSize):
@@ -208,13 +253,12 @@ public partial class MainWindow : Window
             case nameof(MainViewModel.ReplyText):
                 KeepReplyAtEnd();
                 break;
+            case nameof(MainViewModel.SettingsOpen) when _vm.SettingsOpen:
+                if (KeyBox.Password != _vm.Settings.AccessKey) KeyBox.Password = _vm.Settings.AccessKey;
+                FocusFirstInTab();
+                break;
             case nameof(MainViewModel.SettingsOpen):
-                if (_vm.SettingsOpen)
-                {
-                    if (KeyBox.Password != _vm.Settings.AccessKey) KeyBox.Password = _vm.Settings.AccessKey;
-                    FocusFirstInTab();
-                }
-                else Dispatcher.BeginInvoke(() => { Scrollback.ScrollToEnd(); ExpandedPrompt.Focus(); });
+                FocusTerminal();
                 break;
             case nameof(MainViewModel.Topmost):
                 Topmost = _vm.Topmost;
@@ -222,21 +266,40 @@ public partial class MainWindow : Window
         }
     }
 
-    void ApplyFont() => FontSize = _vm.BaseFontSize + (_vm.IsExpanded ? 2 : 0);
-
-    void ApplyGlow() => Screen.Effect = _vm.Glow ? (System.Windows.Media.Effects.Effect)FindResource("Glow") : null;
-
-    void KeepReplyAtEnd() => Dispatcher.BeginInvoke(() => ReplyScroll.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Background);
-
-    void OnLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    private void OnSettingsChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!_vm.IsExpanded || !_vm.IsVisible) return;
-        // Follow the tail unless the user scrolled up to read.
-        if (Scrollback.VerticalOffset >= Scrollback.ScrollableHeight - 40)
-            Dispatcher.BeginInvoke(() => Scrollback.ScrollToEnd(), System.Windows.Threading.DispatcherPriority.Background);
+        switch (e.PropertyName)
+        {
+            case nameof(SettingsViewModel.ConfirmVisible) when _vm.Settings.ConfirmVisible:
+                Dispatcher.BeginInvoke(() => ConfirmYes.Focus());
+                break;
+            case nameof(SettingsViewModel.TabIndex):
+                FocusFirstInTab();
+                break;
+        }
     }
 
-    void ToggleLayout()
+    private void FocusTerminal() => Dispatcher.BeginInvoke(() =>
+    {
+        Scrollback.ScrollToEnd();
+        ExpandedPrompt.Focus();
+    });
+
+    private void ApplyFont() => FontSize = _vm.BaseFontSize + (_vm.IsExpanded ? 2 : 0);
+
+    private void ApplyGlow() => Screen.Effect = _vm.Glow ? (Effect)FindResource("Glow") : null;
+
+    private void KeepReplyAtEnd() => Dispatcher.BeginInvoke(() => ReplyScroll.ScrollToEnd(), DispatcherPriority.Background);
+
+    /// <summary>Follows the tail unless you scrolled up to read.</summary>
+    private void OnLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (!_vm.IsExpanded || !_vm.IsVisible) return;
+        if (Scrollback.VerticalOffset < Scrollback.ScrollableHeight - 40) return;
+        Dispatcher.BeginInvoke(() => Scrollback.ScrollToEnd(), DispatcherPriority.Background);
+    }
+
+    private void ToggleLayout()
     {
         SaveBounds();
         _vm.IsExpanded = !_vm.IsExpanded;
@@ -245,15 +308,9 @@ public partial class MainWindow : Window
         _vm.Store.Save();
     }
 
-    public void OpenSettings()
+    /// <summary>Dragging a compact strip taller turns it into the terminal (and back).</summary>
+    private void AutoLayoutAfterResize()
     {
-        if (!_vm.IsExpanded) ToggleLayout();
-        _vm.SettingsOpen = true;
-    }
-
-    void AutoLayoutAfterResize()
-    {
-        // Dragging a compact strip taller turns it into the terminal (and back).
         bool wantExpanded = ActualHeight >= ExpandThreshold;
         if (wantExpanded == _vm.IsExpanded) return;
         _vm.IsExpanded = wantExpanded;
@@ -262,201 +319,279 @@ public partial class MainWindow : Window
         _vm.Store.Save();
     }
 
-    void ApplyBounds(bool expanded)
+    private void ApplyBounds(bool expanded)
     {
-        var b = expanded ? _vm.S.Bounds.Expanded : _vm.S.Bounds.Compact;
-        if (b is not { Length: 4 }) return;
-        double w = Math.Max(MinWidth, b[2]), h = Math.Max(MinHeight, b[3]);
-        if (expanded) h = Math.Max(h, ExpandThreshold);
-        else h = Math.Min(h, ExpandThreshold - 1);
-        double x = b[0], y = b[1];
-        // Clamp to the visible desktop (a monitor may have been unplugged since last run).
-        var vl = SystemParameters.VirtualScreenLeft; var vt = SystemParameters.VirtualScreenTop;
-        var vw = SystemParameters.VirtualScreenWidth; var vh = SystemParameters.VirtualScreenHeight;
-        if (x + w < vl + 60 || x > vl + vw - 60 || y < vt - 10 || y > vt + vh - 40)
+        var bounds = expanded ? _vm.S.Bounds.Expanded : _vm.S.Bounds.Compact;
+        if (bounds is not { Length: 4 }) return;
+        double width = Math.Max(MinWidth, bounds[2]);
+        double height = Math.Max(MinHeight, bounds[3]);
+        height = expanded ? Math.Max(height, ExpandThreshold) : Math.Min(height, ExpandThreshold - 1);
+        double x = bounds[0], y = bounds[1];
+        if (OffScreen(x, y, width))
         {
-            var wa = SystemParameters.WorkArea;
-            x = wa.Right - w - 20;
-            y = wa.Top + 20;
+            // A monitor may have been unplugged since the last run.
+            var work = SystemParameters.WorkArea;
+            x = work.Right - width - 20;
+            y = work.Top + 20;
         }
         _applyingBounds = true;
-        Left = x; Top = y; Width = w; Height = h;
+        Left = x;
+        Top = y;
+        Width = width;
+        Height = height;
         _applyingBounds = false;
     }
 
-    void SaveBounds()
+    private static bool OffScreen(double x, double y, double width)
+    {
+        double left = SystemParameters.VirtualScreenLeft, top = SystemParameters.VirtualScreenTop;
+        double right = left + SystemParameters.VirtualScreenWidth, bottom = top + SystemParameters.VirtualScreenHeight;
+        return x + width < left + 60 || x > right - 60 || y < top - 10 || y > bottom - 40;
+    }
+
+    private void SaveBounds()
     {
         if (_applyingBounds || WindowState != WindowState.Normal || !IsLoaded) return;
-        double[] b = [Math.Round(Left), Math.Round(Top), Math.Round(ActualWidth), Math.Round(ActualHeight)];
-        if (_vm.IsExpanded) _vm.S.Bounds.Expanded = b; else _vm.S.Bounds.Compact = b;
+        double[] bounds = [Math.Round(Left), Math.Round(Top), Math.Round(ActualWidth), Math.Round(ActualHeight)];
+        if (_vm.IsExpanded) _vm.S.Bounds.Expanded = bounds;
+        else _vm.S.Bounds.Compact = bounds;
         _vm.Store.Save();
     }
 
-    // ================================================================== title bar buttons
+    #endregion
 
-    void Layout_Click(object sender, RoutedEventArgs e) => ToggleLayout();
-    void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
-    void Hide_Click(object sender, RoutedEventArgs e) => Hide();
+    #region Title bar
 
-    // ================================================================== keyboard
+    private void Layout_Click(object sender, RoutedEventArgs e) => ToggleLayout();
 
-    bool _spacePtt;
+    private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
-    bool TypingSomewhere => Keyboard.FocusedElement is TextBox or PasswordBox;
+    private void Hide_Click(object sender, RoutedEventArgs e) => Hide();
 
-    void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm.SettingsOpen)
+        {
+            _vm.SettingsOpen = false;
+            return;
+        }
+        Activate();
+        OpenSettings();
+    }
+
+    #endregion
+
+    #region Keyboard
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (_vm.Settings.ConfirmVisible) return;
         switch (e.Key)
         {
             case Key.Escape:
-                if (_vm.AlarmActive || _vm.Playback.IsPlaying) { _vm.Dismiss(); e.Handled = true; }
-                else if (_vm.SettingsOpen) { _vm.SettingsOpen = false; e.Handled = true; }
-                else if (_vm.PromptActive && !_vm.IsExpanded) { _vm.PromptText = ""; _vm.PromptActive = false; Focus(); e.Handled = true; }
+                e.Handled = Escape();
                 break;
             case Key.F2:
-                if (_vm.SettingsOpen) _vm.SettingsOpen = false; else { Activate(); OpenSettings(); }
+                if (_vm.SettingsOpen) _vm.SettingsOpen = false;
+                else
+                {
+                    Activate();
+                    OpenSettings();
+                }
                 e.Handled = true;
                 break;
             case Key.Space when !TypingSomewhere && !_vm.SettingsOpen:
-                if (!e.IsRepeat && !_spacePtt) { _spacePtt = true; _vm.PttStart(); }
+                // Space is push-to-talk while the window has focus and nothing is being typed.
+                if (!e.IsRepeat && !_spacePtt)
+                {
+                    _spacePtt = true;
+                    _vm.PttStart();
+                }
                 e.Handled = true;
                 break;
         }
     }
 
-    void OnPreviewKeyUp(object sender, KeyEventArgs e)
+    /// <summary>Esc: silence, then close settings, then clear the compact prompt. Returns whether it did anything.</summary>
+    private bool Escape()
     {
-        if (e.Key == Key.Space && _spacePtt)
+        if (_vm.AlarmActive || _vm.Playback.IsPlaying)
         {
-            _spacePtt = false;
-            _ = _vm.PttEnd();
-            e.Handled = true;
+            _vm.Dismiss();
+            return true;
         }
+        if (_vm.SettingsOpen)
+        {
+            _vm.SettingsOpen = false;
+            return true;
+        }
+        if (!_vm.PromptActive || _vm.IsExpanded) return false;
+        _vm.PromptText = "";
+        _vm.PromptActive = false;
+        Focus();
+        return true;
+    }
+
+    private void OnPreviewKeyUp(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Space || !_spacePtt) return;
+        EndSpacePtt();
+        e.Handled = true;
+    }
+
+    private void EndSpacePtt()
+    {
+        if (!_spacePtt) return;
+        _spacePtt = false;
+        _ = _vm.PttEnd();
     }
 
     /// <summary>Typing any printable key opens the prompt (compact) or focuses it (expanded).</summary>
-    void OnPreviewTextInput(object sender, TextCompositionEventArgs e)
+    private void OnPreviewTextInput(object sender, TextCompositionEventArgs e)
     {
         if (TypingSomewhere || _vm.SettingsOpen || string.IsNullOrEmpty(e.Text) || e.Text == " " || char.IsControl(e.Text[0])) return;
         var box = _vm.IsExpanded ? ExpandedPrompt : CompactPrompt;
         _vm.PromptActive = true;
         _vm.PromptText += e.Text;
         e.Handled = true;
-        Dispatcher.BeginInvoke(() => { box.Focus(); box.CaretIndex = box.Text.Length; }, System.Windows.Threading.DispatcherPriority.Input);
+        Dispatcher.BeginInvoke(() =>
+        {
+            box.Focus();
+            box.CaretIndex = box.Text.Length;
+        }, DispatcherPriority.Input);
     }
 
-    void Prompt_PreviewKeyDown(object sender, KeyEventArgs e)
+    private void Prompt_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter)
+        switch (e.Key)
         {
-            _vm.SendPromptCommand.Execute(null);
-            if (!_vm.IsExpanded) Focus();
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Escape && !_vm.AlarmActive && !_vm.Playback.IsPlaying)
-        {
-            _vm.PromptText = "";
-            _vm.PromptActive = _vm.IsExpanded;
-            Focus();
-            e.Handled = true;
-        }
-    }
-
-    void Timer_PreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Delete && sender is Button b)
-        {
-            b.Command?.Execute(b.CommandParameter);
-            e.Handled = true;
+            case Key.Enter:
+                _vm.SendPromptCommand.Execute(null);
+                if (!_vm.IsExpanded) Focus();
+                e.Handled = true;
+                break;
+            case Key.Escape when !_vm.AlarmActive && !_vm.Playback.IsPlaying:
+                _vm.PromptText = "";
+                _vm.PromptActive = _vm.IsExpanded;
+                Focus();
+                e.Handled = true;
+                break;
         }
     }
 
-    // ================================================================== settings navigation
-
-    void Settings_PreviewKeyDown(object sender, KeyEventArgs e)
+    private void Timer_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
-        var s = _vm.Settings;
-        if ((ctrl && e.Key == Key.Right) || e.Key == Key.PageDown || (ctrl && e.Key == Key.Tab && (Keyboard.Modifiers & ModifierKeys.Shift) == 0))
-        { s.NextTab(1); e.Handled = true; return; }
-        if ((ctrl && e.Key == Key.Left) || e.Key == Key.PageUp || (ctrl && e.Key == Key.Tab))
-        { s.NextTab(-1); e.Handled = true; return; }
+        if (e.Key != Key.Delete || sender is not Button button) return;
+        button.Command?.Execute(button.CommandParameter);
+        e.Handled = true;
+    }
 
-        if (Keyboard.FocusedElement is RadioButton && e.Key is Key.Left or Key.Right)
-        { s.NextTab(e.Key == Key.Right ? 1 : -1); e.Handled = true; return; }
+    #endregion
 
+    #region Settings navigation
+
+    private void Settings_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        var modifiers = Keyboard.Modifiers;
+        bool ctrl = (modifiers & ModifierKeys.Control) != 0;
+        bool shift = (modifiers & ModifierKeys.Shift) != 0;
+        int tabStep = e.Key switch
+        {
+            Key.PageDown => 1,
+            Key.PageUp => -1,
+            Key.Right when ctrl => 1,
+            Key.Left when ctrl => -1,
+            Key.Tab when ctrl => shift ? -1 : 1,
+            Key.Right when Keyboard.FocusedElement is RadioButton => 1,
+            Key.Left when Keyboard.FocusedElement is RadioButton => -1,
+            _ => 0,
+        };
+        if (tabStep != 0)
+        {
+            _vm.Settings.NextTab(tabStep);
+            e.Handled = true;
+            return;
+        }
         // Up/Down walk the rows, except inside the multi-line editor.
-        if (e.Key is Key.Up or Key.Down && Keyboard.FocusedElement is UIElement el && el != Editor && el is not ListBoxItem)
-        {
-            el.MoveFocus(new TraversalRequest(e.Key == Key.Down ? FocusNavigationDirection.Next : FocusNavigationDirection.Previous));
-            e.Handled = true;
-        }
+        if (e.Key is not (Key.Up or Key.Down) || Keyboard.FocusedElement is not UIElement element || element == Editor || element is ListBoxItem) return;
+        element.MoveFocus(new TraversalRequest(e.Key == Key.Down ? FocusNavigationDirection.Next : FocusNavigationDirection.Previous));
+        e.Handled = true;
     }
 
-    void FocusFirstInTab() => Dispatcher.BeginInvoke(() =>
+    private void FocusFirstInTab() => Dispatcher.BeginInvoke(() =>
     {
-        var radio = TabStrip.Children.OfType<RadioButton>().ElementAtOrDefault(_vm.Settings.TabIndex);
-        radio?.Focus();
-    }, System.Windows.Threading.DispatcherPriority.Loaded);
+        TabStrip.Children.OfType<RadioButton>().ElementAtOrDefault(_vm.Settings.TabIndex)?.Focus();
+    }, DispatcherPriority.Loaded);
 
-    void RowEditor_PreviewKeyDown(object sender, KeyEventArgs e)
+    private void RowEditor_PreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (sender is not TextBox { DataContext: ConfigRow row }) return;
-        if (e.Key == Key.Enter) { _vm.Settings.CommitRowCommand.Execute(row); e.Handled = true; }
-        else if (e.Key == Key.Escape) { _vm.Settings.CancelRowCommand.Execute(row); e.Handled = true; }
+        switch (e.Key)
+        {
+            case Key.Enter:
+                _vm.Settings.CommitRowCommand.Execute(row);
+                e.Handled = true;
+                break;
+            case Key.Escape:
+                _vm.Settings.CancelRowCommand.Execute(row);
+                e.Handled = true;
+                break;
+        }
     }
 
-    void RowEditor_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    private void RowEditor_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        if (sender is TextBox tb && tb.IsVisible) Dispatcher.BeginInvoke(() => { tb.Focus(); tb.SelectAll(); });
+        if (sender is not TextBox { IsVisible: true } box) return;
+        Dispatcher.BeginInvoke(() =>
+        {
+            box.Focus();
+            box.SelectAll();
+        });
     }
 
-    void KeyBox_PasswordChanged(object sender, RoutedEventArgs e)
+    private void KeyBox_PasswordChanged(object sender, RoutedEventArgs e)
     {
         if (KeyBox.Password != _vm.Settings.AccessKey) _vm.Settings.AccessKey = KeyBox.Password;
     }
 
-    // ================================================================== FILES editor line numbers
+    #endregion
 
-    void Editor_TextChanged(object sender, TextChangedEventArgs e)
+    #region FILES editor
+
+    private void Editor_TextChanged(object sender, TextChangedEventArgs e)
     {
-        int n = Math.Max(1, Editor.LineCount);
-        var sb = new System.Text.StringBuilder(n * 4);
-        for (int i = 1; i <= n; i++) sb.Append(i).Append('\n');
-        LineNumbers.Text = sb.ToString(0, sb.Length - 1);
+        int lines = Math.Max(1, Editor.LineCount);
+        LineNumbers.Text = string.Join('\n', Enumerable.Range(1, lines));
     }
 
-    void Editor_ScrollChanged(object sender, ScrollChangedEventArgs e) => LineNumberScroll.ScrollToVerticalOffset(e.VerticalOffset);
+    private void Editor_ScrollChanged(object sender, ScrollChangedEventArgs e) => LineNumberScroll.ScrollToVerticalOffset(e.VerticalOffset);
 
-    // ================================================================== footer
+    #endregion
 
-    void Mic_Click(object sender, MouseButtonEventArgs e) => _ = _vm.MicClicked();
+    #region Footer
 
-    void Volume_MouseWheel(object sender, MouseWheelEventArgs e)
+    private void Mic_Click(object sender, MouseButtonEventArgs e) => _ = _vm.MicClicked();
+
+    private void Volume_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         _vm.NudgeVolume(Math.Sign(e.Delta));
         e.Handled = true;
     }
 
-    void Ptt_Down(object sender, MouseButtonEventArgs e)
+    private void Ptt_Down(object sender, MouseButtonEventArgs e)
     {
         PttButton.CaptureMouse();
         _vm.PttStart();
         e.Handled = true;
     }
 
-    void Ptt_Up(object sender, MouseButtonEventArgs e)
+    private void Ptt_Up(object sender, MouseButtonEventArgs e)
     {
         PttButton.ReleaseMouseCapture();
         e.Handled = true;
     }
 
-    void Ptt_Lost(object sender, MouseEventArgs e) => _ = _vm.PttEnd();
+    private void Ptt_Lost(object sender, MouseEventArgs e) => _ = _vm.PttEnd();
 
-    protected override void OnContentRendered(EventArgs e)
-    {
-        base.OnContentRendered(e);
-        KeyBox.Password = _vm.Settings.AccessKey;
-    }
+    #endregion
 }

@@ -1,51 +1,47 @@
-using System.ComponentModel;
-using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media.Imaging;
 using H.NotifyIcon;
-using TarsClient.Services;
-using TarsClient.ViewModels;
 using TarsClient.Views;
 
 namespace TarsClient;
 
-/// <summary>Single instance (named mutex), tray icon and menu, startup and quit.</summary>
+/// <summary>Single instance (a named mutex), the tray icon and menu, startup and quit.</summary>
 public partial class App : Application
 {
-    const string MutexName = @"Local\TARS.Desktop.SingleInstance";
-    const string ShowEventName = @"Local\TARS.Desktop.Show";
+    #region Fields
 
-    Mutex? _mutex;
-    EventWaitHandle? _showEvent;
-    TaskbarIcon? _tray;
-    MainViewModel? _vm;
-    MainWindow? _window;
-    readonly List<MenuItem> _modeItems = [];
-    MenuItem? _topItem, _muteItem;
+    private const string MutexName = @"Local\TARS.Desktop.SingleInstance";
+    private const string ShowEventName = @"Local\TARS.Desktop.Show";
 
+    private static readonly (string Key, string Label)[] Modes =
+        [("ptt", "Push to talk"), ("wake", "Say \"TARS\""), ("open", "Always listening")];
+
+    private readonly List<MenuItem> _modeItems = [];
+    private Mutex? _mutex;
+    private EventWaitHandle? _showEvent;
+    private TaskbarIcon? _tray;
+    private MainViewModel? _vm;
+    private MainWindow? _window;
+    private MenuItem? _topItem;
+    private MenuItem? _muteItem;
+    private bool _quitting;
+
+    #endregion
+
+    #region Protected Methods
+
+    /// <inheritdoc />
     protected override void OnStartup(StartupEventArgs e)
     {
         _mutex = new Mutex(true, MutexName, out bool first);
         if (!first)
         {
-            // Already running: bring that one forward and leave.
-            try { EventWaitHandle.OpenExisting(ShowEventName).Set(); } catch { }
+            SignalRunningInstance();
             Shutdown();
             return;
         }
-        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
-        new Thread(() =>
-        {
-            while (_showEvent.WaitOne()) Dispatcher.BeginInvoke(() => _window?.ShowFromTray());
-        }) { IsBackground = true, Name = "TARS single-instance" }.Start();
-
-        DispatcherUnhandledException += (_, ex) =>
-        {
-            Log.Write("unhandled: " + ex.Exception);
-            ex.Handled = true;
-        };
-        AppDomain.CurrentDomain.UnhandledException += (_, ex) => Log.Write("fatal: " + ex.ExceptionObject);
-        TaskScheduler.UnobservedTaskException += (_, ex) => { Log.Write("task: " + ex.Exception.GetBaseException().Message); ex.SetObserved(); };
+        ListenForShowRequests();
+        HandleUnhandledExceptions();
 
         base.OnStartup(e);
 
@@ -56,7 +52,7 @@ public partial class App : Application
 
         _vm = new MainViewModel(store);
         _window = new MainWindow(_vm);
-        BuildTray();
+        BuildTray(_vm);
 
         bool minimized = e.Args.Contains("--minimized") || store.Current.StartMinimized;
         if (!minimized) _window.Show();
@@ -64,31 +60,77 @@ public partial class App : Application
         Log.Write($"started (minimized={minimized})");
     }
 
-    void BuildTray()
+    /// <inheritdoc />
+    protected override void OnExit(ExitEventArgs e)
     {
-        var vm = _vm!;
-        var menu = new ContextMenu();
+        _tray?.Dispose();
+        _mutex?.Dispose();
+        base.OnExit(e);
+    }
 
-        menu.Items.Add(Item("Show", () => _window!.ShowFromTray()));
+    #endregion
 
-        var mode = new MenuItem { Header = "Mode" };
-        foreach (var (key, label) in new[] { ("ptt", "Push to talk"), ("wake", "Say \"TARS\""), ("open", "Always listening") })
+    #region Private Methods
+
+    /// <summary>Already running: we bring that one forward and leave.</summary>
+    private static void SignalRunningInstance()
+    {
+        try
         {
-            var mi = new MenuItem { Header = label, Tag = key, IsCheckable = false };
-            mi.Click += (_, _) => vm.ApplyMode(key, send: true);
-            _modeItems.Add(mi);
-            mode.Items.Add(mi);
+            EventWaitHandle.OpenExisting(ShowEventName).Set();
         }
-        menu.Items.Add(mode);
+        catch (WaitHandleCannotBeOpenedException)
+        {
+            // The other instance is still starting or already gone.
+        }
+    }
 
+    private void ListenForShowRequests()
+    {
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+        new Thread(() =>
+        {
+            while (_showEvent.WaitOne()) Dispatcher.BeginInvoke(() => _window?.ShowFromTray());
+        })
+        {
+            IsBackground = true,
+            Name = "TARS single-instance",
+        }.Start();
+    }
+
+    /// <summary>An always-on app logs and carries on rather than vanishing from the tray.</summary>
+    private void HandleUnhandledExceptions()
+    {
+        DispatcherUnhandledException += (_, ex) =>
+        {
+            Log.Write("unhandled: " + ex.Exception);
+            ex.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, ex) => Log.Write("fatal: " + ex.ExceptionObject);
+        TaskScheduler.UnobservedTaskException += (_, ex) =>
+        {
+            Log.Write("task: " + ex.Exception.GetBaseException().Message);
+            ex.SetObserved();
+        };
+    }
+
+    private void BuildTray(MainViewModel vm)
+    {
+        var menu = new ContextMenu();
+        menu.Items.Add(Item("Show", () => _window!.ShowFromTray()));
+        menu.Items.Add(ModeMenu(vm));
         _topItem = Item("Always on top", () => vm.TogglePinCommand.Execute(null));
         _muteItem = Item("Mute mic", () => vm.MicMuted = !vm.MicMuted);
         menu.Items.Add(_topItem);
         menu.Items.Add(_muteItem);
-        menu.Items.Add(Item("Settings", () => { _window!.ShowFromTray(); _window.OpenSettings(); }));
+        menu.Items.Add(Item("Settings", () =>
+        {
+            _window!.ShowFromTray();
+            _window.OpenSettings();
+        }));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Quit", Quit));
-        menu.Opened += (_, _) => SyncMenu();
+        menu.Opened += (_, _) => SyncMenu(vm);
 
         _tray = new TaskbarIcon
         {
@@ -109,37 +151,46 @@ public partial class App : Application
         };
     }
 
-    static MenuItem Item(string header, Action onClick)
+    private MenuItem ModeMenu(MainViewModel vm)
     {
-        var mi = new MenuItem { Header = header };
-        mi.Click += (_, _) => onClick();
-        return mi;
+        var mode = new MenuItem { Header = "Mode" };
+        foreach (var (key, label) in Modes)
+        {
+            var item = new MenuItem { Header = label, Tag = key };
+            item.Click += (_, _) => vm.ApplyMode(key, send: true);
+            _modeItems.Add(item);
+            mode.Items.Add(item);
+        }
+        return mode;
     }
 
-    void SyncMenu()
+    private static MenuItem Item(string header, Action onClick)
     {
-        var vm = _vm!;
-        foreach (var mi in _modeItems) mi.IsChecked = (string)mi.Tag == vm.Mode;
+        var item = new MenuItem { Header = header };
+        item.Click += (_, _) => onClick();
+        return item;
+    }
+
+    private void SyncMenu(MainViewModel vm)
+    {
+        foreach (var item in _modeItems) item.IsChecked = (string)item.Tag == vm.Mode;
         _topItem!.IsChecked = vm.Topmost;
         _muteItem!.IsChecked = vm.MicMuted;
     }
 
-    bool _quitting;
-
-    void Quit()
+    private void Quit()
     {
         _quitting = true;
         Log.Write("quit");
         _vm?.Shutdown();
         _tray?.Dispose();
-        if (_window != null) { _window.AllowClose = true; _window.Close(); }
+        if (_window != null)
+        {
+            _window.AllowClose = true;
+            _window.Close();
+        }
         Shutdown();
     }
 
-    protected override void OnExit(ExitEventArgs e)
-    {
-        _tray?.Dispose();
-        _mutex?.Dispose();
-        base.OnExit(e);
-    }
+    #endregion
 }

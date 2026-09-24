@@ -1,4 +1,3 @@
-using System.IO;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -6,36 +5,70 @@ using NAudio.Wave.SampleProviders;
 namespace TarsClient.Services;
 
 /// <summary>
-/// One output stream, always open: a gapless 24 kHz mono queue (server WAVs, local voice PCM, chime),
-/// volume 0–150 % with a soft clip above 100 %, resampled to the device mix format.
-/// PlaybackStarted / PlaybackEnded (queue empty for 250 ms) are raised on the UI thread.
+/// One output stream, always open: a gapless 24 kHz mono queue (local voice, WAVs, the chime) at 0–150 % volume with
+/// a soft clip above 100 %, resampled to the device's mix format. <see cref="PlaybackStarted"/> and
+/// <see cref="PlaybackEnded"/> (queue empty for 250 ms) are raised on the UI thread.
 /// </summary>
 public sealed class AudioPlayback : IDisposable
 {
+    #region Fields
+
+    /// <summary>The queue's sample rate.</summary>
     public const int Rate = 24000;
 
-    readonly SpeechQueue _queue = new();
-    readonly System.Windows.Threading.Dispatcher _ui;
-    readonly System.Windows.Threading.DispatcherTimer _watch;
-    WasapiOut? _out;
-    string _deviceId = "";
-    bool _playing;
+    private const int EndAfterMs = 250;
 
-    public event Action? PlaybackStarted;
-    public event Action? PlaybackEnded;
+    private readonly SpeechQueue _queue = new();
+    private readonly Dispatcher _ui;
+    private readonly DispatcherTimer _watch;
+    private WasapiOut? _out;
+    private string _deviceId = "";
+    private bool _playing;
 
-    public bool IsPlaying => _playing;
-    /// <summary>When the last audible sample was handed to the device (UTC ticks), for the echo tail.</summary>
-    public long LastAudioTicks => Interlocked.Read(ref _queue.LastAudioTicks);
-    public double Volume { get => _queue.Volume; set => _queue.Volume = Math.Clamp(value, 0, 1.5); }
+    #endregion
 
-    public AudioPlayback(System.Windows.Threading.Dispatcher ui)
+    #region Constructor
+
+    /// <summary>Creates the player; playback events are raised on <paramref name="ui"/>.</summary>
+    public AudioPlayback(Dispatcher ui)
     {
         _ui = ui;
-        _watch = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _watch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _watch.Tick += (_, _) => CheckEnded();
     }
 
+    #endregion
+
+    #region Properties
+
+    /// <summary>Whether anything is queued or audible.</summary>
+    public bool IsPlaying => _playing;
+
+    /// <summary>When the last audible sample went to the device (UTC ticks), for the echo tail.</summary>
+    public long LastAudioTicks => _queue.LastAudioTicks;
+
+    /// <summary>Output volume, 0–1.5.</summary>
+    public double Volume
+    {
+        get => _queue.Volume;
+        set => _queue.Volume = Math.Clamp(value, 0, 1.5);
+    }
+
+    #endregion
+
+    #region Events
+
+    /// <summary>The first queued audio started.</summary>
+    public event Action? PlaybackStarted;
+
+    /// <summary>The queue has been empty for 250 ms, or we stopped.</summary>
+    public event Action? PlaybackEnded;
+
+    #endregion
+
+    #region Public Methods
+
+    /// <summary>Opens <paramref name="deviceId"/> (empty means the Windows default).</summary>
     public void Open(string deviceId)
     {
         _deviceId = deviceId;
@@ -49,51 +82,42 @@ public sealed class AudioPlayback : IDisposable
         {
             _out?.Dispose();
             _out = null;
-            using var en = new MMDeviceEnumerator();
-            var dev = AudioDevices.Find(en, DataFlow.Render, _deviceId) ?? en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-            var mix = dev.AudioClient.MixFormat;
+            using var enumerator = new MMDeviceEnumerator();
+            var device = AudioDevices.Find(enumerator, DataFlow.Render, _deviceId)
+                         ?? enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            var mix = device.AudioClient.MixFormat;
             ISampleProvider chain = _queue;
             if (mix.SampleRate != Rate) chain = new WdlResamplingSampleProvider(chain, mix.SampleRate);
             chain = new ChannelFan(chain, mix.Channels);
-            _out = new WasapiOut(dev, AudioClientShareMode.Shared, true, 60);
-            _out.PlaybackStopped += (_, e) =>
-            {
-                if (e.Exception != null)
-                {
-                    Log.Write($"playback stopped: {e.Exception.Message}; reopening");
-                    _ui.BeginInvoke(async () => { await Task.Delay(800); Reopen(); });
-                }
-            };
+
+            _out = new WasapiOut(device, AudioClientShareMode.Shared, true, 60);
+            _out.PlaybackStopped += OnPlaybackStopped;
             _out.Init(chain);
             _out.Play();
-            Log.Write($"playback: {dev.FriendlyName} {mix.SampleRate} Hz x{mix.Channels}");
+            Log.Write($"playback: {device.FriendlyName} {mix.SampleRate} Hz x{mix.Channels}");
         }
-        catch (Exception ex)
+        catch (System.Runtime.InteropServices.COMException ex)
         {
             Log.Write($"playback: open failed: {ex.Message}");
-            _ui.BeginInvoke(async () => { await Task.Delay(2000); if (_out == null) Reopen(); });
+            _ui.BeginInvoke(async () =>
+            {
+                await Task.Delay(2000);
+                if (_out == null) Reopen();
+            });
         }
     }
 
-    /// <summary>Queue a complete WAV (server voice). Any PCM rate/channels are converted to 24 kHz mono.</summary>
+    /// <summary>Queues a complete WAV (any PCM rate and channel count).</summary>
     public void EnqueueWav(byte[] wav)
     {
-        try
+        try { Enqueue(DecodeWav(wav)); }
+        catch (Exception ex) when (ex is FormatException or InvalidDataException or ArgumentException)
         {
-            using var reader = new WaveFileReader(new MemoryStream(wav));
-            ISampleProvider sp = reader.ToSampleProvider();
-            if (sp.WaveFormat.Channels == 2) sp = new StereoToMonoSampleProvider(sp);
-            if (sp.WaveFormat.SampleRate != Rate) sp = new WdlResamplingSampleProvider(sp, Rate);
-            var all = new List<float>((int)(reader.SampleCount + 1024));
-            var buf = new float[4096];
-            int n;
-            while ((n = sp.Read(buf, 0, buf.Length)) > 0) all.AddRange(buf.AsSpan(0, n));
-            Enqueue(all.ToArray());
+            Log.Write($"playback: bad wav: {ex.Message}");
         }
-        catch (Exception ex) { Log.Write($"playback: bad wav: {ex.Message}"); }
     }
 
-    /// <summary>Queue 24 kHz mono float samples (local voice streams call this per chunk).</summary>
+    /// <summary>Queues 24 kHz mono samples (the local voice calls this once per streamed chunk).</summary>
     public void Enqueue(float[] samples)
     {
         if (samples.Length == 0) return;
@@ -106,115 +130,181 @@ public sealed class AudioPlayback : IDisposable
         _watch.Start();
     }
 
-    /// <summary>Three sine blips: 880, 880, 1175 Hz, 180 ms each, 220 ms apart, peak 0.5.</summary>
-    public void Chime()
-    {
-        int step = (int)(Rate * 0.22), len = (int)(Rate * 0.18);
-        var s = new float[step * 2 + len];
-        double[] f = [880, 880, 1175];
-        for (int b = 0; b < 3; b++)
-            for (int i = 0; i < len; i++)
-            {
-                double t = (double)i / Rate;
-                double env = Math.Min(1, i / (Rate * 0.01)) * Math.Min(1, (len - i) / (Rate * 0.04));
-                s[b * step + i] = (float)(0.5 * env * Math.Sin(2 * Math.PI * f[b] * t));
-            }
-        Enqueue(s);
-    }
+    /// <summary>Queues the alarm chime.</summary>
+    public void Chime() => Enqueue(ChimeSamples());
 
-    /// <summary>Clear the queue and silence immediately.</summary>
+    /// <summary>Clears the queue and goes silent immediately.</summary>
     public void Stop()
     {
         _queue.Clear();
         CheckEnded(force: true);
     }
 
-    void CheckEnded(bool force = false)
-    {
-        if (!_playing) { _watch.Stop(); return; }
-        var idleMs = (DateTime.UtcNow.Ticks - LastAudioTicks) / TimeSpan.TicksPerMillisecond;
-        if (force || (_queue.IsEmpty && idleMs >= 250))
-        {
-            _playing = false;
-            _watch.Stop();
-            PlaybackEnded?.Invoke();
-        }
-    }
-
+    /// <inheritdoc />
     public void Dispose() => _out?.Dispose();
 
-    /// <summary>The queue itself: reads silence when empty so the device stream never stops.</summary>
-    sealed class SpeechQueue : ISampleProvider
+    #endregion
+
+    #region Internal Methods
+
+    /// <summary>Three sine blips: 880, 880 and 1175 Hz, 180 ms each, 220 ms apart, peak 0.5.</summary>
+    internal static float[] ChimeSamples()
     {
-        readonly Queue<float[]> _q = new();
-        float[]? _cur;
-        int _pos;
-        public long LastAudioTicks;
-        public double Volume = 1.0;
+        int step = (int)(Rate * 0.22), length = (int)(Rate * 0.18);
+        var samples = new float[step * 2 + length];
+        double[] freqs = [880, 880, 1175];
+        for (int blip = 0; blip < freqs.Length; blip++)
+        {
+            for (int i = 0; i < length; i++)
+            {
+                double envelope = Math.Min(1, i / (Rate * 0.01)) * Math.Min(1, (length - i) / (Rate * 0.04));
+                samples[blip * step + i] = (float)(0.5 * envelope * Math.Sin(2 * Math.PI * freqs[blip] * i / Rate));
+            }
+        }
+        return samples;
+    }
+
+    /// <summary>Any PCM WAV → 24 kHz mono float.</summary>
+    internal static float[] DecodeWav(byte[] wav)
+    {
+        using var reader = new WaveFileReader(new MemoryStream(wav));
+        ISampleProvider provider = reader.ToSampleProvider();
+        if (provider.WaveFormat.Channels == 2) provider = new StereoToMonoSampleProvider(provider);
+        if (provider.WaveFormat.SampleRate != Rate) provider = new WdlResamplingSampleProvider(provider, Rate);
+
+        var all = new List<float>((int)(reader.SampleCount + 1024));
+        var buffer = new float[4096];
+        int n;
+        while ((n = provider.Read(buffer, 0, buffer.Length)) > 0) all.AddRange(buffer.AsSpan(0, n));
+        return [.. all];
+    }
+
+    /// <summary>Linear up to 0.8, then a tanh knee that never exceeds 1.0, so 150 % volume doesn't crackle.</summary>
+    internal static float SoftClip(float x)
+    {
+        float a = Math.Abs(x);
+        if (a <= 0.8f) return x;
+        return Math.Sign(x) * (0.8f + 0.2f * MathF.Tanh((a - 0.8f) / 0.2f));
+    }
+
+    #endregion
+
+    #region Private Methods
+
+    private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
+    {
+        if (e.Exception == null) return;
+        Log.Write($"playback stopped: {e.Exception.Message}; reopening");
+        _ui.BeginInvoke(async () =>
+        {
+            await Task.Delay(800);
+            Reopen();
+        });
+    }
+
+    private void CheckEnded(bool force = false)
+    {
+        if (!_playing)
+        {
+            _watch.Stop();
+            return;
+        }
+        var idleMs = (DateTime.UtcNow.Ticks - LastAudioTicks) / TimeSpan.TicksPerMillisecond;
+        if (!force && (!_queue.IsEmpty || idleMs < EndAfterMs)) return;
+
+        _playing = false;
+        _watch.Stop();
+        PlaybackEnded?.Invoke();
+    }
+
+    #endregion
+
+    #region Nested Types
+
+    /// <summary>The queue itself. It reads silence when empty, so the device stream never stops.</summary>
+    private sealed class SpeechQueue : ISampleProvider
+    {
+        private readonly Queue<float[]> _chunks = new();
+        private float[]? _current;
+        private int _pos;
+        private long _lastAudioTicks;
 
         public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(Rate, 1);
 
-        public bool IsEmpty { get { lock (_q) return _cur == null && _q.Count == 0; } }
+        public double Volume { get; set; } = 1.0;
 
-        public void Add(float[] s) { lock (_q) _q.Enqueue(s); }
+        public long LastAudioTicks => Interlocked.Read(ref _lastAudioTicks);
 
-        public void Clear() { lock (_q) { _q.Clear(); _cur = null; _pos = 0; } }
+        public bool IsEmpty
+        {
+            get { lock (_chunks) return _current == null && _chunks.Count == 0; }
+        }
+
+        public void Add(float[] samples)
+        {
+            lock (_chunks) _chunks.Enqueue(samples);
+        }
+
+        public void Clear()
+        {
+            lock (_chunks)
+            {
+                _chunks.Clear();
+                _current = null;
+                _pos = 0;
+            }
+        }
 
         public int Read(float[] buffer, int offset, int count)
         {
             int written = 0;
-            float vol = (float)Volume;
-            lock (_q)
+            float volume = (float)Volume;
+            lock (_chunks)
             {
                 while (written < count)
                 {
-                    if (_cur == null)
+                    if (_current == null)
                     {
-                        if (_q.Count == 0) break;
-                        _cur = _q.Dequeue();
+                        if (_chunks.Count == 0) break;
+                        _current = _chunks.Dequeue();
                         _pos = 0;
                     }
-                    int n = Math.Min(count - written, _cur.Length - _pos);
+                    int n = Math.Min(count - written, _current.Length - _pos);
                     for (int i = 0; i < n; i++)
                     {
-                        float x = _cur[_pos + i] * vol;
-                        if (vol > 1f) x = SoftClip(x);
-                        buffer[offset + written + i] = x;
+                        float x = _current[_pos + i] * volume;
+                        buffer[offset + written + i] = volume > 1f ? SoftClip(x) : x;
                     }
                     written += n;
                     _pos += n;
-                    if (_pos >= _cur.Length) _cur = null;
+                    if (_pos >= _current.Length) _current = null;
                 }
             }
-            if (written > 0) Interlocked.Exchange(ref LastAudioTicks, DateTime.UtcNow.Ticks);
+            if (written > 0) Interlocked.Exchange(ref _lastAudioTicks, DateTime.UtcNow.Ticks);
             Array.Clear(buffer, offset + written, count - written);
             return count;
-        }
-
-        /// <summary>Linear up to 0.8, then a tanh knee that never exceeds 1.0 (no crackle at 150 %).</summary>
-        static float SoftClip(float x)
-        {
-            float a = Math.Abs(x);
-            if (a <= 0.8f) return x;
-            return Math.Sign(x) * (0.8f + 0.2f * MathF.Tanh((a - 0.8f) / 0.2f));
         }
     }
 
     /// <summary>Mono to N device channels.</summary>
-    sealed class ChannelFan(ISampleProvider src, int channels) : ISampleProvider
+    private sealed class ChannelFan(ISampleProvider source, int channels) : ISampleProvider
     {
-        float[] _mono = [];
-        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(src.WaveFormat.SampleRate, channels);
+        private float[] _mono = [];
+
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(source.WaveFormat.SampleRate, channels);
 
         public int Read(float[] buffer, int offset, int count)
         {
             int frames = count / channels;
             if (_mono.Length < frames) _mono = new float[frames];
-            int got = src.Read(_mono, 0, frames);
+            int got = source.Read(_mono, 0, frames);
             for (int f = 0; f < got; f++)
-                for (int c = 0; c < channels; c++)
-                    buffer[offset + f * channels + c] = _mono[f];
+            {
+                for (int c = 0; c < channels; c++) buffer[offset + f * channels + c] = _mono[f];
+            }
             return got * channels;
         }
     }
+
+    #endregion
 }

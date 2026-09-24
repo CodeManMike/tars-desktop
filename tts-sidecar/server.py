@@ -1,7 +1,7 @@
 """TARS local voice sidecar.
 
 An OpenAI-compatible speech endpoint (POST /v1/audio/speech) backed by Chatterbox on the local GPU.
-The desktop client starts this process, health-checks it, and falls back to the server voice when it's down.
+The desktop client starts this process, health-checks it, and falls back to the Windows voice when it's down.
 
 Engines:
   turbo      ResembleAI/chatterbox-turbo  GPU. fast, natural; clones the reference clip; ignores exaggeration / cfg
@@ -68,11 +68,14 @@ class Engines:
         self.gpu = threading.Lock()
         self.loading: set[str] = set()
         self.last_use = time.time()
+        self._kokoro_lock = threading.Lock()
 
     def resolve(self, name: str | None) -> str:
+        """An engine name, or the default for anything else ("tts-1" etc.)."""
         return name if name in ENGINES else self.default
 
     def load(self, name: str):
+        """Load an engine unless it is resident. Callers hold the GPU lock for GPU engines."""
         if name in self.models:
             return self.models[name]
         if name in GPU_ENGINES:
@@ -107,6 +110,7 @@ class Engines:
             self.loading.discard(name)
 
     def unload(self, gpu_only: bool = True):
+        """Free the GPU engines (or everything) and hand the VRAM back."""
         with self.gpu:
             for name in list(self.models):
                 if name in GPU_ENGINES or not gpu_only:
@@ -121,6 +125,7 @@ class Engines:
         log.info("models unloaded")
 
     def synth(self, req: SpeechRequest) -> np.ndarray:
+        """Render one chunk of text as 24 kHz float audio."""
         name = self.resolve(req.model)
         if name == "kokoro":
             return self.kokoro(req.input, req.kokoro_voice or KOKORO_VOICE, req.speed)
@@ -146,11 +151,8 @@ class Engines:
             audio = librosa.effects.time_stretch(audio, rate=float(req.speed))
         return audio
 
-
-    _kokoro_lock = threading.Lock()
-
     def kokoro(self, text: str, voice: str, speed: float = 1.0) -> np.ndarray:
-        # CPU engine: its own lock, so it never waits behind GPU work.
+        """Kokoro on the CPU with a blended voice ("name:weight,..."). Its own lock: it never waits behind GPU work."""
         with self._kokoro_lock:
             pipe = self.load("kokoro")
             pack = None
@@ -170,10 +172,12 @@ REFERENCE_TEXT = ("Systems nominal. I have checked the numbers twice, and they a
 
 
 def to_pcm16(audio: np.ndarray) -> bytes:
+    """Float audio to Int16 LE bytes."""
     return (np.clip(audio, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
 
 
 def to_wav(pcm: bytes) -> bytes:
+    """Wrap 24 kHz mono PCM16 in a WAV header."""
     header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
     header += b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, SAMPLE_RATE, SAMPLE_RATE * 2, 2, 16)
     header += b"data" + struct.pack("<I", len(pcm))
@@ -184,6 +188,7 @@ _SENTENCE = re.compile(r"(?<=[.!?…])\s+(?=\S)")
 
 
 def sentences(text: str) -> list[str]:
+    """Split text into the chunks we voice one at a time."""
     parts = [p.strip() for p in _SENTENCE.split(text.strip()) if p.strip()] or [text.strip()]
     # First audio sooner: a long opening sentence is voiced clause first (the comma is a natural pause anyway).
     head = parts[0]
@@ -194,6 +199,7 @@ def sentences(text: str) -> list[str]:
 
 
 def build_app(engines: Engines, transcriber=None) -> FastAPI:
+    """The HTTP API: health, speech, engine load/unload, reference rendering, and STT when enabled."""
     app = FastAPI(title="TARS voice sidecar")
     if transcriber is not None:
         import stt

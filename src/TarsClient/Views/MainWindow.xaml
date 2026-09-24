@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:c="clr-namespace:TarsClient.Controls"
+        xmlns:cv="clr-namespace:TarsClient.Controls.Converters"
         xmlns:vm="clr-namespace:TarsClient.ViewModels"
         Title="TARS"
         WindowStyle="None" ResizeMode="CanResize" ShowInTaskbar="True"
@@ -21,14 +22,14 @@
     </WindowChrome.WindowChrome>
 
     <Window.Resources>
-        <c:BoolToVis x:Key="Vis" />
-        <c:BoolToVis x:Key="NotVis" Invert="True" />
-        <c:IndexToVis x:Key="TabVis" />
-        <c:IndexToBool x:Key="TabBool" />
-        <c:LineBrush x:Key="LineBrush" />
-        <c:TagFormat x:Key="Tag" />
-        <c:FlashBrush x:Key="Flash" />
-        <c:Scale x:Key="Scale" />
+        <cv:BoolToVis x:Key="Vis" />
+        <cv:BoolToVis x:Key="NotVis" Invert="True" />
+        <cv:IndexToVis x:Key="TabVis" />
+        <cv:IndexToBool x:Key="TabBool" />
+        <cv:LineBrush x:Key="LineBrush" />
+        <cv:TagFormat x:Key="Tag" />
+        <cv:FlashBrush x:Key="Flash" />
+        <cv:Scale x:Key="Scale" />
 
         <Style x:Key="Dim" TargetType="TextBlock">
             <Setter Property="Foreground" Value="{StaticResource FgDim}" />

@@ -16,7 +16,8 @@ Uninstall from *Apps & Features*.
 ## Build
 
 ```powershell
-dotnet build src/TarsClient            # dev build: src/TarsClient/bin/Debug/net10.0-windows/TARS.exe
+dotnet build TarsDesktop.slnx          # client, setup and tests (warnings are errors)
+dotnet test TarsDesktop.slnx           # NUnit: golden-JSON protocol tests, parsers, audio helpers
 pwsh build/build-installer.ps1         # artifacts/TARS-Setup-<version>.exe
 pwsh tts-sidecar/install.ps1           # the voice venv at %LOCALAPPDATA%\TARS\tts-venv
 ```
@@ -29,8 +30,11 @@ Requires the .NET 10 SDK; the voice engine needs Python 3.11 (or `uv`) and an NV
 |---|---|
 | `src/TarsClient` | WPF client (.NET 10): window, tray, protocol, audio, hotkeys, settings, admin screens |
 | `src/TarsSetup` | the retro installer / uninstaller (embeds the published client) |
-| `tts-sidecar` | local voice: FastAPI, OpenAI-style `/v1/audio/speech`; Chatterbox Turbo / Chatterbox (GPU), Kokoro (CPU) |
-| `build` | installer build script, icon generator |
+| `tests/TarsClient.Tests` | NUnit tests |
+| `tts-sidecar` | local voice and speech-to-text: FastAPI; `/v1/audio/speech` (Chatterbox Turbo / Chatterbox on the GPU, Kokoro on the CPU) and `/stt/stream` (Silero VAD + faster-whisper) |
+| `build` | installer build script, local deploy script, icon generator |
+
+Contributing (people or agents): read [`AGENTS.md`](AGENTS.md) first.
 
 ## Voice
 

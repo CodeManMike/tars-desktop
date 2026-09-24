@@ -1,17 +1,20 @@
-using System.IO;
-using System.Windows;
-
 namespace TarsSetup;
 
+/// <summary>
+/// Setup and uninstall in one exe: <c>--uninstall</c>, or simply being named <c>TARS-Uninstall.exe</c>, selects
+/// uninstall; <c>--quiet</c> runs with the defaults and closes when done.
+/// </summary>
 public partial class App : Application
 {
+    #region Protected Methods
+
+    /// <inheritdoc />
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        // Uninstall mode: --uninstall, or simply being named TARS-Uninstall.exe.
-        bool uninstall = e.Args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)) ||
+        bool uninstall = HasFlag(e.Args, "--uninstall") ||
                          Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "").Contains("uninstall", StringComparison.OrdinalIgnoreCase);
-        bool quiet = e.Args.Any(a => a.Equals("--quiet", StringComparison.OrdinalIgnoreCase));
+        bool quiet = HasFlag(e.Args, "--quiet");
         if (uninstall && Installer.RelaunchFromTempIfInside(e.Args))
         {
             Shutdown();
@@ -19,4 +22,12 @@ public partial class App : Application
         }
         new SetupWindow(uninstall, quiet).Show();
     }
+
+    #endregion
+
+    #region Private Methods
+
+    private static bool HasFlag(string[] args, string flag) => args.Any(a => a.Equals(flag, StringComparison.OrdinalIgnoreCase));
+
+    #endregion
 }
