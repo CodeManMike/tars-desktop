@@ -242,7 +242,9 @@ public sealed class LocalVoice : IDisposable
         if (minutes <= 0 || !_loaded.Any(e => e is "turbo" or "chatterbox")) return;
         if (DateTime.UtcNow - _lastSay < TimeSpan.FromMinutes(minutes)) return;
         await PostAsync("/unload");
-        Log.Write($"voice: GPU model unloaded after {minutes} idle minutes");
+        // Kokoro covers the next reply while the GPU voice reloads: have it warm, not cold (it's CPU and small).
+        await PostAsync("/load?model=kokoro", TimeSpan.FromMinutes(1));
+        Log.Write($"voice: GPU model unloaded after {minutes} idle minutes (kokoro warm for the next reply)");
     }
 
     async void OnGameModeChanged()
@@ -325,7 +327,9 @@ public sealed class LocalVoice : IDisposable
             var key = $"{engine}|{text}|{_settings().Tts.Speed}|{_settings().Tts.FxPitch}|{_settings().Tts.FxRing}|{_settings().Tts.Fx}";
             if (filler && _fillerCache.TryGetValue(key, out var cached)) { _playback.Enqueue(cached); return; }
 
-            var result = await StreamAsync(engine, text, filler ? 1.1 : 1.0, stop, TimeSpan.FromSeconds(3), collect: filler);
+            // A cold Kokoro needs a few seconds to load; the 3 s budget is for engines that are already resident.
+            var firstAudio = engine == "kokoro" && !_loaded.Contains("kokoro") ? TimeSpan.FromSeconds(12) : TimeSpan.FromSeconds(3);
+            var result = await StreamAsync(engine, text, filler ? 1.1 : 1.0, stop, firstAudio, collect: filler);
             if (result.Ok)
             {
                 if (filler && result.Samples != null) _fillerCache[key] = result.Samples;
@@ -337,7 +341,7 @@ public sealed class LocalVoice : IDisposable
             if (engine != "kokoro" && !result.Started)
             {
                 Note?.Invoke($"  · voice {engine}: no audio in 3 s, using kokoro");
-                result = await StreamAsync("kokoro", text, 1.0, stop, TimeSpan.FromSeconds(6), collect: false);
+                result = await StreamAsync("kokoro", text, 1.0, stop, TimeSpan.FromSeconds(_loaded.Contains("kokoro") ? 6 : 12), collect: false);
                 if (result.Ok || result.Started || stop.IsCancellationRequested) return;
             }
             else if (result.Started) return;
